@@ -1535,7 +1535,7 @@ const Freq = class SystemMonitor_Freq extends ElementBase {
     }
     refresh() {
         let freq_max = 0;
-        let freq_min = 100000;
+        let freq_min = 100000000000;
         let freq_avg = 0;
         let num_cpus = Math.min(GTop.glibtop_get_sysinfo().ncpu, 4);
         for (let i = 0; i < num_cpus; i++) {
