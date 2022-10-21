@@ -20,36 +20,41 @@
 
 /* Ugly. This is here so that we don't crash old libnm-glib based shells unnecessarily
  * by loading the new libnm.so. Should go away eventually */
-const libnm_glib = imports.gi.GIRepository.Repository.get_default().is_registered("NMClient", "1.0");
 
-let smDepsGtop = true;
-let smDepsNM = true;
+var libnm_glib = imports.gi.GIRepository.Repository.get_default().is_registered('NMClient', '1.0');
 
-const Config = imports.misc.config;
-const Clutter = imports.gi.Clutter;
-const GLib = imports.gi.GLib;
+var smDepsGtop = true;
+var smDepsNM = true;
 
-const Gio = imports.gi.Gio;
-const Lang = imports.lang;
-const Shell = imports.gi.Shell;
-const St = imports.gi.St;
-const Power = imports.ui.status.power;
+var Config = imports.misc.config;
+var Clutter = imports.gi.Clutter;
+var GLib = imports.gi.GLib;
+var GObject = imports.gi.GObject;
+var Lang = imports.lang;
+
+var Gio = imports.gi.Gio;
+var Shell = imports.gi.Shell;
+var St = imports.gi.St;
+const UPower = imports.gi.UPowerGlib;
+
 // const System = imports.system;
-const ModalDialog = imports.ui.modalDialog;
+var ModalDialog = imports.ui.modalDialog;
 
-const ExtensionSystem = imports.ui.extensionSystem;
-const ExtensionUtils = imports.misc.extensionUtils;
+var ByteArray = imports.byteArray;
 
-const Me = ExtensionUtils.getCurrentExtension();
-const Convenience = Me.imports.convenience;
-const Compat = Me.imports.compat;
+var ExtensionSystem = imports.ui.extensionSystem;
+var ExtensionUtils = imports.misc.extensionUtils;
 
-let Background, GTop, IconSize, Locale, MountsMonitor, NM, NetworkManager, Schema, StatusArea, Style, gc_timeout, menu_timeout;
+var Me = ExtensionUtils.getCurrentExtension();
+var Convenience = Me.imports.convenience;
+var Compat = Me.imports.compat;
+
+var Background, GTop, IconSize, Locale, MountsMonitor, NM, NetworkManager, Schema, StatusArea, Style, gc_timeout, menu_timeout;
 
 try {
     GTop = imports.gi.GTop;
 } catch (e) {
-    log(e);
+    log('[System monitor] catched error: ' + e);
     smDepsGtop = false;
 }
 
@@ -57,7 +62,7 @@ try {
     NM = libnm_glib ? imports.gi.NMClient : imports.gi.NM;
     NetworkManager = libnm_glib ? imports.gi.NetworkManager : NM;
 } catch (e) {
-    log(e);
+    log('[System monitor] catched error: ' + e);
     smDepsNM = false;
 }
 
@@ -73,11 +78,12 @@ const _ = Gettext.gettext;
 
 const MESSAGE = _('Dependencies Missing\n\
 Please install: \n\
-libgtop, Network Manager and gir bindings \n\
-\t    on Ubuntu: gir1.2-gtop-2.0, gir1.2-networkmanager-1.0 \n\
-\t    on Fedora: libgtop2-devel, NetworkManager-glib-devel \n\
-\t    on Arch: libgtop, networkmanager\n\
-\t    on openSUSE: typelib-1_0-GTop-2_0, typelib-1_0-NetworkManager-1_0\n');
+gnome-system-monitor and libgtop, clutter and Network Manager gir bindings \n\
+\t    on Debian and Ubuntu: gir1.2-gtop-2.0, gir1.2-nm-1.0, gir1.2-clutter-1.0, gnome-system-monitor \n\
+\t    on Fedora: libgtop2-devel, NetworkManager-libnm-devel, gnome-system-monitor \n\
+\t    on Arch: libgtop, networkmanager, gnome-system-monitor\n\
+\t    on openSUSE: typelib-1_0-GTop-2_0, typelib-1_0-NetworkManager-1_0, gnome-system-monitor \n\
+\t    on Mageia 64-bit: lib64gtop-gir2.0, lib64nm-gir1.0, lib64clutter-gir1.0, gnome-system-monitor\n');
 
 // stale network shares will cause the shell to freeze, enable this with caution
 const ENABLE_NETWORK_DISK_USAGE = false;
@@ -85,6 +91,28 @@ const ENABLE_NETWORK_DISK_USAGE = false;
 let extension = imports.misc.extensionUtils.getCurrentExtension();
 let metadata = extension.metadata;
 let shell_Version = Config.PACKAGE_VERSION;
+
+Clutter.Actor.prototype.raise_top = function raise_top() {
+    const parent = this.get_parent();
+    if (!parent) {
+        return;
+    }
+    parent.set_child_above_sibling(this, null);
+}
+Clutter.Actor.prototype.reparent = function reparent(newParent) {
+    const parent = this.get_parent();
+    if (parent) {
+        parent.remove_child(this);
+    }
+    newParent.add_child(this);
+}
+
+function parse_bytearray(bytearray) {
+    if (!ByteArray.toString(bytearray).match(/GjsModule byteArray/)) {
+        return ByteArray.toString(bytearray);
+    }
+    return bytearray
+}
 
 function l_limit(t) {
     return (t > 0) ? t : 1000;
@@ -116,7 +144,7 @@ function build_menu_info() {
 
     let menu_info_box_table = new St.Widget({
         style: 'padding: 10px 0px 10px 0px; spacing-rows: 10px; spacing-columns: 15px;',
-        layout_manager: new Clutter.TableLayout()
+        layout_manager: new Clutter.GridLayout({orientation: Clutter.Orientation.VERTICAL})
     });
     let menu_info_box_table_layout = menu_info_box_table.layout_manager;
 
@@ -128,23 +156,30 @@ function build_menu_info() {
         }
 
         // Add item name to table
-        menu_info_box_table_layout.pack(
+        menu_info_box_table_layout.attach(
             new St.Label({
                 text: elts[elt].item_name,
-                style_class: Style.get('sm-title')}), 0, row_index);
+                style_class: Style.get('sm-title'),
+                x_align: Clutter.ActorAlign.START,
+                y_align: Clutter.ActorAlign.CENTER
+            }), 0, row_index, 1, 1);
 
         // Add item data to table
         let col_index = 1;
         for (let item in elts[elt].menu_items) {
-            menu_info_box_table_layout.pack(
-                elts[elt].menu_items[item], col_index, row_index);
+            menu_info_box_table_layout.attach(
+                elts[elt].menu_items[item], col_index, row_index, 1, 1);
 
             col_index++;
         }
 
         row_index++;
     }
-    tray_menu._getMenuItems()[0].actor.get_last_child().add(menu_info_box_table, {expand: true});
+    if (shell_Version < '3.36') {
+        tray_menu._getMenuItems()[0].actor.get_last_child().add(menu_info_box_table, {expand: true});
+    } else {
+        tray_menu._getMenuItems()[0].actor.get_last_child().add_child(menu_info_box_table);
+    }
 }
 
 function change_menu() {
@@ -168,99 +203,88 @@ function interesting_mountpoint(mount) {
 }
 
 
-const smStyleManager = new Lang.Class({
-    Name: 'SystemMonitor.smStyleManager',
-    _extension: '',
-    _iconsize: 1,
-    _diskunits: _('MiB/s'),
-    _netunits_kbytes: _('KiB/s'),
-    _netunits_mbytes: _('MiB/s'),
-    _netunits_kbits: _('kbit/s'),
-    _netunits_mbits: _('Mbit/s'),
-    _pie_width: 300,
-    _pie_height: 300,
-    _pie_fontsize: 14,
-    _bar_width: 300,
-    _bar_height: 150,
-    _bar_fontsize: 14,
-    _text_scaling: 1,
-
-    _init: function () {
+const smStyleManager = class SystemMonitor_smStyleManager {
+    constructor() {
+        this._extension = '';
+        this._iconsize = 1;
+        this._diskunits = _('MiB/s');
+        this._netunits_kbytes = _('KiB/s');
+        this._netunits_mbytes = _('MiB/s');
+        this._netunits_gbytes = _('GiB/s');
+        this._netunits_kbits = _('kbit/s');
+        this._netunits_mbits = _('Mbit/s');
+        this._netunits_gbits = _('Gbit/s');
+        this._pie_size = 300;
+        this._pie_fontsize = 14;
+        this._bar_width = 300;
+        this._bar_thickness = 15;
+        this._bar_fontsize = 14;
         this._compact = Schema.get_boolean('compact-display');
+
         if (this._compact) {
             this._extension = '-compact';
             this._iconsize = 3 / 5;
             this._diskunits = _('MB');
             this._netunits_kbytes = _('kB');
             this._netunits_mbytes = _('MB');
+            this._netunits_gbytes = _('GB');
             this._netunits_kbits = 'kb';
             this._netunits_mbits = 'Mb';
-            this._pie_width *= 4 / 5;
-            this._pie_height *= 4 / 5;
+            this._netunits_gbits = 'Gb';
+            this._pie_size *= 4 / 5;
             this._pie_fontsize = 12;
             this._bar_width *= 3 / 5;
-            this._bar_height *= 3 / 5;
+            this._bar_thickness = 12;
             this._bar_fontsize = 12;
         }
-
-        let interfaceSettings = new Gio.Settings({
-            schema: 'org.gnome.desktop.interface'
-        });
-        this._text_scaling = interfaceSettings.get_double('text-scaling-factor');
-        if (!this._text_scaling) {
-            this._text_scaling = 1;
-        }
-    },
-    get: function (style) {
+    }
+    get(style) {
         return style + this._extension;
-    },
-    iconsize: function () {
+    }
+    iconsize() {
         return this._iconsize;
-    },
-    diskunits: function () {
+    }
+    diskunits() {
         return this._diskunits;
-    },
-    netunits_kbytes: function () {
+    }
+    netunits_kbytes() {
         return this._netunits_kbytes;
-    },
-    netunits_mbytes: function () {
+    }
+    netunits_mbytes() {
         return this._netunits_mbytes;
-    },
-    netunits_kbits: function () {
+    }
+    netunits_gbytes() {
+        return this._netunits_gbytes;
+    }
+    netunits_kbits() {
         return this._netunits_kbits;
-    },
-    netunits_mbits: function () {
+    }
+    netunits_mbits() {
         return this._netunits_mbits;
-    },
-    pie_width: function () {
-        return this._pie_width;
-    },
-    pie_height: function () {
-        return this._pie_height;
-    },
-    pie_fontsize: function () {
-        return this._pie_fontsize * this._text_scaling;
-    },
-    bar_width: function () {
+    }
+    netunits_gbits() {
+        return this._netunits_gbits;
+    }
+    pie_size() {
+        return this._pie_size;
+    }
+    pie_fontsize() {
+        return this._pie_fontsize;
+    }
+    bar_width() {
         return this._bar_width;
-    },
-    bar_height: function () {
-        return this._bar_height;
-    },
-    bar_fontsize: function () {
-        return this._bar_fontsize * this._text_scaling;
-    },
-    text_scaling: function () {
-        return this._text_scaling;
-    },
-});
+    }
+    bar_thickness() {
+        return this._bar_thickness;
+    }
+    bar_fontsize() {
+        return this._bar_fontsize;
+    }
+}
 
-const smDialog = Lang.Class({
-    Name: 'SystemMonitor.smDialog',
-    Extends: ModalDialog.ModalDialog,
-
-    _init: function () {
-        this.parent({styleClass: 'prompt-dialog'});
+const smDialog = class SystemMonitor_smDialog extends ModalDialog.ModalDialog {
+    constructor() {
+        super({styleClass: 'prompt-dialog'});
         let mainContentBox = new St.BoxLayout({style_class: 'prompt-dialog-main-layout',
             vertical: false});
         this.contentLayout.add(mainContentBox,
@@ -290,31 +314,32 @@ const smDialog = Lang.Class({
         this.setButtons([
             {
                 label: _('Cancel'),
-                action: Lang.bind(this, function () {
+                action: () => {
                     this.close();
-                }),
+                },
                 key: Clutter.Escape
             }
         ]);
-    },
+    }
+}
 
-});
-
-const Chart = new Lang.Class({
-    Name: 'SystemMonitor.Chart',
-
-    _init: function (width, height, parent) {
+const Chart = class SystemMonitor_Chart {
+    constructor(width, height, parent) {
         this.actor = new St.DrawingArea({style_class: Style.get('sm-chart'), reactive: false});
         this.parentC = parent;
-        this.actor.set_width(this.width = width);
-        this.actor.set_height(this.height = height);
-        this.actor.connect('repaint', Lang.bind(this, this._draw));
+        this.width = width;
+        let themeContext = St.ThemeContext.get_for_stage(global.stage);
+        this.scale_factor = themeContext.scale_factor;
+        this.actor.set_width(this.width * this.scale_factor);
+        this.actor.set_height(height);
         this.data = [];
         for (let i = 0; i < this.parentC.colors.length; i++) {
             this.data[i] = [];
         }
-    },
-    update: function () {
+        themeContext.connect('notify::scale-factor', this.rescale.bind(this));
+        this.actor.connect('repaint', this._draw.bind(this));
+    }
+    update() {
         let data_a = this.parentC.vals;
         if (data_a.length !== this.parentC.colors.length) {
             return;
@@ -331,8 +356,8 @@ const Chart = new Lang.Class({
             return;
         }
         this.actor.queue_repaint();
-    },
-    _draw: function () {
+    }
+    _draw() {
         if (!this.actor.visible) {
             return;
         }
@@ -349,111 +374,128 @@ const Chart = new Lang.Class({
         cr.rectangle(0, 0, width, height);
         cr.fill();
         for (let i = this.parentC.colors.length - 1; i >= 0; i--) {
-            cr.moveTo(width, height);
-            for (let j = this.data[i].length - 1; j >= 0; j--) {
-                cr.lineTo(width - (this.data[i].length - 1 - j), (1 - this.data[i][j] / max) * height);
+            let samples = this.data[i].length - 1;
+            if (samples > 0) {
+                cr.moveTo(width, height); // bottom right
+                let x = width - 0.25 * this.scale_factor;
+                cr.lineTo(x, (1 - this.data[i][samples] / max) * height);
+                x -= 0.5 * this.scale_factor;
+                for (let j = samples; j >= 0; j--) {
+                    let y = (1 - this.data[i][j] / max) * height;
+                    cr.lineTo(x, y);
+                    x -= 0.5 * this.scale_factor;
+                    cr.lineTo(x, y);
+                    x -= 0.5 * this.scale_factor;
+                }
+                x += 0.25 * this.scale_factor;
+                cr.lineTo(x, (1 - this.data[i][0] / max) * height);
+                cr.lineTo(x, height);
+                cr.closePath();
+                Clutter.cairo_set_source_color(cr, this.parentC.colors[i]);
+                cr.fill();
             }
-            cr.lineTo(width - (this.data[i].length - 1), height);
-            cr.closePath();
-            Clutter.cairo_set_source_color(cr, this.parentC.colors[i]);
-            cr.fill();
         }
-        if (Compat.versionCompare(shell_Version, '3.7.4')) {
-            cr.$dispose();
-        }
-    },
-    resize: function (schema, key) {
-        let old_width = this.width;
-        this.width = Schema.get_int(key);
-        if (old_width === this.width) {
+        cr.$dispose();
+    }
+    resize(width) {
+        if (this.width === width) {
             return;
         }
-        this.actor.set_width(this.width);
+        this.width = width;
         if (this.width < this.data[0].length) {
             for (let i = 0; i < this.parentC.colors.length; i++) {
                 this.data[i] = this.data[i].slice(-this.width);
             }
         }
+        this.actor.set_width(this.width * this.scale_factor); // repaints
     }
-});
+    rescale(themeContext) {
+        this.scale_factor = themeContext.scale_factor;
+        this.actor.set_width(this.width * this.scale_factor); // repaints
+    }
+}
 
 // Class to deal with volumes insertion / ejection
-const smMountsMonitor = new Lang.Class({
-    Name: 'SystemMonitor.smMountsMonitor',
-    files: [],
-    num_mounts: -1,
-    listeners: [],
-    connected: false,
-    _init: function () {
+const smMountsMonitor = class SystemMonitor_smMountsMonitor {
+    constructor() {
+        this.files = [];
+        this.num_mounts = -1;
+        this.listeners = [];
+        this.connected = false;
+
         this._volumeMonitor = Gio.VolumeMonitor.get();
         let sys_mounts = ['/home', '/tmp', '/boot', '/usr', '/usr/local'];
         this.base_mounts = ['/'];
-        sys_mounts.forEach(Lang.bind(this, function (sMount) {
+        sys_mounts.forEach((sMount) => {
             if (this.is_sys_mount(sMount + '/')) {
                 this.base_mounts.push(sMount);
             }
-        }));
+        });
         this.connect();
-    },
-    refresh: function () {
+    }
+    refresh() {
         // try check that number of volumes has changed
-        /* try {
-            let num_mounts = this.manager.getMounts().length;
-            if (num_mounts == this.num_mounts)
-                return;
-            this.num_mounts = num_mounts;
-        } catch (e) {};*/
+        // try {
+        //     let num_mounts = this.manager.getMounts().length;
+        //     if (num_mounts == this.num_mounts)
+        //         return;
+        //     this.num_mounts = num_mounts;
+        // } catch (e) {};
 
         // Can't get mountlist:
         // GTop.glibtop_get_mountlist
         // Error: No symbol 'glibtop_get_mountlist' in namespace 'GTop'
         // Getting it with mtab
-        /* let mount_lines = Shell.get_file_contents_utf8_sync('/etc/mtab').split("\n");
-        this.mounts = [];
-        for(let mount_line in mount_lines) {
-            let mount = mount_lines[mount_line].split(" ");
-            if(interesting_mountpoint(mount) && this.mounts.indexOf(mount[1]) < 0) {
-                this.mounts.push(mount[1]);
-            }
-        }
-        log("old mounts: " + this.mounts);*/
+        // let mount_lines = Shell.get_file_contents_utf8_sync('/etc/mtab').split("\n");
+        // this.mounts = [];
+        // for(let mount_line in mount_lines) {
+        //     let mount = mount_lines[mount_line].split(" ");
+        //     if(interesting_mountpoint(mount) && this.mounts.indexOf(mount[1]) < 0) {
+        //         this.mounts.push(mount[1]);
+        //     }
+        // }
+        // log("[System monitor] old mounts: " + this.mounts);
         this.mounts = [];
         for (let base in this.base_mounts) {
-            // log(this.base_mounts[base]);
+            // log("[System monitor] " + this.base_mounts[base]);
             this.mounts.push(this.base_mounts[base]);
         }
         let mount_lines = this._volumeMonitor.get_mounts();
-        mount_lines.forEach(Lang.bind(this, function (mount) {
-            if (!this.is_ro_mount(mount) &&
-                (!this.is_net_mount(mount) || ENABLE_NETWORK_DISK_USAGE)) {
+        mount_lines.forEach((mount) => {
+            if ((!this.is_net_mount(mount) || ENABLE_NETWORK_DISK_USAGE) &&
+                 !this.is_ro_mount(mount)) {
                 let mpath = mount.get_root().get_path() || mount.get_default_location().get_path();
                 if (mpath) {
                     this.mounts.push(mpath);
                 }
             }
-        }));
-        // log("base: " + this.base_mounts);
-        // log("mounts: " + this.mounts);
+        });
+        // log("[System monitor] base: " + this.base_mounts);
+        // log("[System monitor] mounts: " + this.mounts);
         for (let i in this.listeners) {
             this.listeners[i](this.mounts);
         }
-    },
-    add_listener: function (cb) {
+    }
+    add_listener(cb) {
         this.listeners.push(cb);
-    },
-    remove_listener: function (cb) {
+    }
+    remove_listener(cb) {
         this.listeners.pop(cb);
-    },
-    get_mounts: function () {
+    }
+    get_mounts() {
         return this.mounts;
-    },
-    is_sys_mount: function (mpath) {
+    }
+    is_sys_mount(mpath) {
         let file = Gio.file_new_for_path(mpath);
         let info = file.query_info(Gio.FILE_ATTRIBUTE_UNIX_IS_MOUNTPOINT,
             Gio.FileQueryInfoFlags.NONE, null);
         return info.get_attribute_boolean(Gio.FILE_ATTRIBUTE_UNIX_IS_MOUNTPOINT);
-    },
-    is_ro_mount: function (mount) {
+    }
+    is_ro_mount(mount) {
+        // FIXME: running this function after "login after waking from suspend"
+        // can make login hang. Actual issue seems to occur when a former net
+        // mount got broken (e.g. due to a VPN connection terminated or
+        // otherwise broken connection)
         try {
             let file = mount.get_default_location();
             let info = file.query_filesystem_info(Gio.FILE_ATTRIBUTE_FILESYSTEM_READONLY, null);
@@ -461,8 +503,8 @@ const smMountsMonitor = new Lang.Class({
         } catch (e) {
             return false;
         }
-    },
-    is_net_mount: function (mount) {
+    }
+    is_net_mount(mount) {
         try {
             let file = mount.get_default_location();
             let info = file.query_filesystem_info(Gio.FILE_ATTRIBUTE_FILESYSTEM_TYPE, null);
@@ -472,117 +514,148 @@ const smMountsMonitor = new Lang.Class({
         } catch (e) {
             return false;
         }
-    },
-    connect: function () {
+    }
+    connect() {
         if (this.connected) {
             return;
         }
         try {
             this.manager = this._volumeMonitor;
-            this.mount_added_id = this.manager.connect('mount-added', Lang.bind(this, this.refresh));
-            this.mount_removed_id = this.manager.connect('mount-removed', Lang.bind(this, this.refresh));
+            this.mount_added_id = this.manager.connect('mount-added', this.refresh.bind(this));
+            this.mount_removed_id = this.manager.connect('mount-removed', this.refresh.bind(this));
             // need to add the other signals here
             this.connected = true;
         } catch (e) {
-            log('Failed to register on placesManager notifications');
-            log('Got exception : ' + e);
+            log('[System monitor] Failed to register on placesManager notifications');
+            log('[System monitor] Got exception : ' + e);
         }
         this.refresh();
-    },
-    disconnect: function () {
+    }
+    disconnect() {
         if (!this.connected) {
             return;
         }
         this.manager.disconnect(this.mount_added_id);
         this.manager.disconnect(this.mount_removed_id);
         this.connected = false;
-    },
-    destroy: function () {
+    }
+    destroy() {
         this.disconnect();
     }
-});
+}
 
-const Graph = new Lang.Class({
-    Name: 'SystemMonitor.Graph',
-
-    menu_item: '',
-    _init: function () {
+const Graph = class SystemMonitor_Graph {
+    constructor(width, height) {
+        this.menu_item = '';
         this.actor = new St.DrawingArea({style_class: Style.get('sm-chart'), reactive: false});
-        this.width = arguments[0][0];
-        this.height = arguments[0][1];
-        this.actor.set_width(this.width);
-        this.actor.set_height(this.height);
-        this.actor.connect('repaint', Lang.bind(this, this._draw));
+        this.width = width;
+        this.height = height;
         this.gtop = new GTop.glibtop_fsusage();
         this.colors = ['#888', '#aaa', '#ccc'];
         for (let color in this.colors) {
             this.colors[color] = color_from_string(this.colors[color]);
         }
-    },
-    create_menu_item: function () {
+
+        let themeContext = St.ThemeContext.get_for_stage(global.stage);
+        themeContext.connect('notify::scale-factor', this.set_scale.bind(this));
+        this.scale_factor = themeContext.scale_factor;
+        let interfaceSettings = new Gio.Settings({
+            schema: 'org.gnome.desktop.interface'
+        });
+        interfaceSettings.connect('changed', this.set_text_scaling.bind(this));
+        this.text_scaling = interfaceSettings.get_double('text-scaling-factor');
+        if (!this.text_scaling) {
+            this.text_scaling = 1;
+        }
+
+        this.actor.set_width(this.width * this.scale_factor * this.text_scaling);
+        this.actor.set_height(this.height * this.scale_factor * this.text_scaling);
+        this.actor.connect('repaint', this._draw.bind(this));
+    }
+    create_menu_item() {
         this.menu_item = new PopupMenu.PopupBaseMenuItem({reactive: false});
-        this.menu_item.actor.add(this.actor, {span: -1, expand: true});
+        if (shell_Version < '3.36') {
+            this.menu_item.actor.add(this.actor, {span: -1, expand: true});
+        } else {
+            this.menu_item.actor.add_child(this.actor);
+        }
         // tray.menu.addMenuItem(this.menu_item);
-    },
-    show: function (visible) {
+    }
+    show(visible) {
         this.menu_item.actor.visible = visible;
     }
-});
-const Bar = new Lang.Class({
-    Name: 'SystemMonitor.Bar',
-    Extends: Graph,
-    _init: function () {
+    set_scale(themeContext) {
+        this.scale_factor = themeContext.scale_factor;
+        this.actor.set_width(this.width * this.scale_factor * this.text_scaling);
+        this.actor.set_height(this.height * this.scale_factor * this.text_scaling);
+    }
+    set_text_scaling(interfaceSettings, key) {
+        // FIXME: for some reason we only get this signal once, not on later
+        // changes to the setting
+        //log('[System monitor] got text scaling signal');
+        this.text_scaling = interfaceSettings.get_double(key);
+        this.actor.set_width(this.width * this.scale_factor * this.text_scaling);
+        this.actor.set_height(this.height * this.scale_factor * this.text_scaling);
+    }
+}
+
+const Bar = class SystemMonitor_Bar extends Graph {
+    constructor() {
+        // Height doesn't matter, it gets set on every draw.
+        super(Style.bar_width(), 100);
         this.mounts = MountsMonitor.get_mounts();
-        MountsMonitor.add_listener(Lang.bind(this, this.update_mounts));
-        this.thickness = 15 * Style.text_scaling();
-        this.fontsize = Style.bar_fontsize();
-        this.parent(arguments);
-        this.actor.set_height(this.mounts.length * (3 * this.thickness) / 2);
-    },
-    _draw: function () {
+        MountsMonitor.add_listener(this.update_mounts.bind(this));
+    }
+    _draw() {
         if (!this.actor.visible) {
             return;
         }
-        this.actor.set_height(this.mounts.length * (3 * this.thickness) / 2);
+        let thickness = Style.bar_thickness() * this.scale_factor * this.text_scaling;
+        let fontsize = Style.bar_fontsize() * this.scale_factor * this.text_scaling;
+        this.actor.set_height(this.mounts.length * (3 * thickness));
         let [width, height] = this.actor.get_surface_size();
         let cr = this.actor.get_context();
 
         let x0 = width / 8;
-        let y0 = this.thickness / 2;
-        cr.setLineWidth(this.thickness);
-        cr.setFontSize(this.fontsize);
+        let y0 = thickness / 2;
+        cr.setLineWidth(thickness);
+        cr.setFontSize(fontsize);
         for (let mount in this.mounts) {
             GTop.glibtop_get_fsusage(this.gtop, this.mounts[mount]);
             let perc_full = (this.gtop.blocks - this.gtop.bfree) / this.gtop.blocks;
             Clutter.cairo_set_source_color(cr, this.colors[mount % this.colors.length]);
-            cr.moveTo(2 * x0, y0)
-            cr.relLineTo(perc_full * 0.6 * width, 0);
-            cr.moveTo(0, y0 + this.thickness / 3);
-            cr.showText(this.mounts[mount]);
-            // cr.stroke();
-            cr.moveTo(width - x0, y0 + this.thickness / 3);
+
+            var text = this.mounts[mount];
+            if (text.length > 10) {
+                text = text.split('/').pop();
+            }
+            cr.moveTo(0, y0 + thickness / 3);
+            cr.showText(text);
+            cr.moveTo(width - x0, y0 + thickness / 3);
             cr.showText(Math.round(perc_full * 100).toString() + '%');
+            y0 += (5 * thickness) / 4;
+
+            cr.moveTo(0, y0);
+            cr.relLineTo(perc_full * width, 0);
             cr.stroke();
-            y0 += (3 * this.thickness) / 2;
+            y0 += (7 * thickness) / 4;
         }
-        if (Compat.versionCompare(shell_Version, '3.7.4')) {
-            cr.$dispose();
-        }
-    },
-    update_mounts: function (mounts) {
+        cr.$dispose();
+    }
+    update_mounts(mounts) {
         this.mounts = mounts;
         this.actor.queue_repaint();
     }
-});
-const Pie = new Lang.Class({
-    Name: 'SystemMonitor.Pie',
-    Extends: Graph,
-    _init: function () {
+}
+
+const Pie = class SystemMonitor_Pie extends Graph {
+    constructor() {
+        super(Style.pie_size(), Style.pie_size());
         this.mounts = MountsMonitor.get_mounts();
-        MountsMonitor.add_listener(Lang.bind(this, this.update_mounts));
-        this.parent(arguments);
-    },
-    _draw: function () {
+        MountsMonitor.add_listener(this.update_mounts.bind(this));
+    }
+
+    _draw() {
         if (!this.actor.visible) {
             return;
         }
@@ -590,7 +663,6 @@ const Pie = new Lang.Class({
         let cr = this.actor.get_context();
         let xc = width / 2;
         let yc = height / 2;
-        let rc = Math.min(xc, yc);
         let pi = Math.PI;
         function arc(r, value, max, angle) {
             if (max === 0) {
@@ -600,92 +672,132 @@ const Pie = new Lang.Class({
             cr.arc(xc, yc, r, angle, new_angle);
             return new_angle;
         }
-        let rings = (this.mounts.length > 7 ? this.mounts.length : 7);
-        // If the text is scaled, we need to make more space for it. Hence, we
-        // make the lines thicker.
-        let text_scaling = Style.text_scaling();
-        let thickness = (2 * rc) / (3 * rings) * text_scaling;
-        let fontsize = Style.pie_fontsize();
-        let r = rc - (thickness / 2);
+
+        // Set the ring thickness so that at least 7 rings can be displayed. If
+        // there are more mounts, make the rings thinner. If the rings are too
+        // thin to have a line height of 1.2 for the labels, shrink the labels.
+        let rings = Math.max(this.mounts.length, 7);
+        let ring_width = width / (2 * rings);
+        let fontsize = Style.pie_fontsize() * this.scale_factor * this.text_scaling;
+        if (ring_width < 1.2 * fontsize) {
+            fontsize = ring_width / 1.2;
+        }
+        let thickness = ring_width / 1.5;
+
         cr.setLineWidth(thickness);
         cr.setFontSize(fontsize);
+        let r = (height - ring_width) / 2;
         for (let mount in this.mounts) {
             GTop.glibtop_get_fsusage(this.gtop, this.mounts[mount]);
             Clutter.cairo_set_source_color(cr, this.colors[mount % this.colors.length]);
             arc(r, this.gtop.blocks - this.gtop.bfree, this.gtop.blocks, -pi / 2);
-            cr.moveTo(0, yc - r + thickness / 2);
-            cr.showText(this.mounts[mount]);
             cr.stroke();
-            r -= (3 * thickness) / 2;
+            r -= ring_width;
         }
-        if (Compat.versionCompare(shell_Version, '3.7.4')) {
-            cr.$dispose();
+        let y = (ring_width + fontsize) / 2;
+        for (let mount in this.mounts) {
+            var text = this.mounts[mount];
+            if (text.length > 10) {
+                text = text.split('/').pop();
+            }
+            cr.moveTo(0, y);
+            cr.showText(text);
+            y += ring_width;
         }
-    },
-    update_mounts: function (mounts) {
+        cr.$dispose();
+    }
+
+    update_mounts(mounts) {
         this.mounts = mounts;
         this.actor.queue_repaint();
     }
-});
+}
 
-const TipItem = new Lang.Class({
-    Name: 'SystemMonitor.TipItem',
-    Extends: PopupMenu.PopupBaseMenuItem,
+var TipItem = null;
 
-    _init: function () {
-        PopupMenu.PopupBaseMenuItem.prototype._init.call(this);
-        this.actor.remove_style_class_name('popup-menu-item');
-        this.actor.add_style_class_name('sm-tooltip-item');
+if (shell_Version < '3.36') {
+    TipItem = class SystemMonitor_TipItem extends PopupMenu.PopupBaseMenuItem {
+        constructor() {
+            super();
+            // PopupMenu.PopupBaseMenuItem.prototype._init.call(this);
+            this.actor.remove_style_class_name('popup-menu-item');
+            this.actor.add_style_class_name('sm-tooltip-item');
+        }
     }
-});
-
-const TipMenu = new Lang.Class({
-    Name: 'SystemMonitor.TipMenu',
-    Extends: PopupMenu.PopupMenuBase,
-
-    _init: function (sourceActor) {
+} else {
+    TipItem = GObject.registerClass(
+        {
+            GTypeName: 'TipItem'
+        },
+        class SystemMonitor_TipItem extends PopupMenu.PopupBaseMenuItem {
+            _init() {
+                super._init();
+                // PopupMenu.PopupBaseMenuItem.prototype._init.call(this);
+                this.actor.remove_style_class_name('popup-menu-item');
+                this.actor.add_style_class_name('sm-tooltip-item');
+            }
+        }
+    );
+}
+const TipMenu = class SystemMonitor_TipMenu extends PopupMenu.PopupMenuBase {
+    constructor(sourceActor) {
         // PopupMenu.PopupMenuBase.prototype._init.call(this, sourceActor, 'sm-tooltip-box');
-        this.parent(sourceActor, 'sm-tooltip-box');
-        this.actor = new Shell.GenericContainer();
-        this.actor.connect('get-preferred-width',
-            Lang.bind(this, this._boxGetPreferredWidth));
-        this.actor.connect('get-preferred-height',
-            Lang.bind(this, this._boxGetPreferredHeight));
-        this.actor.connect('allocate', Lang.bind(this, this._boxAllocate));
+        super(sourceActor, 'sm-tooltip-box');
+        this.actor = new Clutter.Actor();
+        // this.actor.connect('get-preferred-width',
+        //     this._boxGetPreferredWidth).bind(this);
+        // this.actor.connect('get-preferred-height',
+        //     this._boxGetPreferredHeight.bind(this));
         this.actor.add_actor(this.box);
-    },
-    _boxGetPreferredWidth: function (actor, forHeight, alloc) {
-        // let columnWidths = this.getColumnWidths();
-        // this.setColumnWidths(columnWidths);
-
-        [alloc.min_size, alloc.natural_size] = this.box.get_preferred_width(forHeight);
-    },
-    _boxGetPreferredHeight: function (actor, forWidth, alloc) {
-        [alloc.min_size, alloc.natural_size] = this.box.get_preferred_height(forWidth);
-    },
-    _boxAllocate: function (actor, box, flags) {
-        this.box.allocate(box, flags);
-    },
-    _shift: function () {
+    }
+    // _boxGetPreferredWidth (actor, forHeight, alloc) {
+    //     // let columnWidths = this.getColumnWidths();
+    //     // this.setColumnWidths(columnWidths);
+    //
+    //     [alloc.min_size, alloc.natural_size] = this.box.get_preferred_width(forHeight);
+    // }
+    // _boxGetPreferredHeight (actor, forWidth, alloc) {
+    //     [alloc.min_size, alloc.natural_size] = this.box.get_preferred_height(forWidth);
+    // }
+    // _boxAllocate (actor, box, flags) {
+    //     this.box.allocate(box, flags);
+    // }
+    _shift() {
         // Probably old but works
         let node = this.sourceActor.get_theme_node();
         let contentbox = node.get_content_box(this.sourceActor.get_allocation_box());
-        let allocation = Shell.util_get_transformed_allocation(this.sourceActor);
-        let monitor = Main.layoutManager.findMonitorForActor(this.sourceActor)
-        let [x, y] = [allocation.x1 + contentbox.x1,
-            allocation.y1 + contentbox.y1];
-        let [cx, cy] = [allocation.x1 + (contentbox.x1 + contentbox.x2) / 2,
-            allocation.y1 + (contentbox.y1 + contentbox.y2) / 2];
-        let [xm, ym] = [allocation.x1 + contentbox.x2,
-            allocation.y1 + contentbox.y2];
+
+        let sourceTopLeftX = 0;
+        let sourceTopLeftY = 0;
+        if (typeof this.sourceActor.get_transformed_extents === 'function') {
+            let extents = this.sourceActor.get_transformed_extents();
+            let sourceTopLeft = extents.get_top_left();
+            sourceTopLeftY = sourceTopLeft.y;
+            sourceTopLeftX = sourceTopLeft.x;
+        } else {
+            let allocation = Shell.util_get_transformed_allocation(this.sourceActor);
+            sourceTopLeftY = allocation.y1;
+            sourceTopLeftX = allocation.x1;
+        }
+        let monitor = Main.layoutManager.findMonitorForActor(this.sourceActor);
+        let [x, y] = [sourceTopLeftX + contentbox.x1,
+            sourceTopLeftY + contentbox.y1];
+        let [cx, cy] = [sourceTopLeftX + (contentbox.x1 + contentbox.x2) / 2,
+            sourceTopLeftY + (contentbox.y1 + contentbox.y2) / 2];
+        let [xm, ym] = [sourceTopLeftX + contentbox.x2,
+            sourceTopLeftY + contentbox.y2];
         let [width, height] = this.actor.get_size();
         let tipx = cx - width / 2;
         tipx = Math.max(tipx, monitor.x);
         tipx = Math.min(tipx, monitor.x + monitor.width - width);
         let tipy = Math.floor(ym);
+        // Hacky condition to determine if the status bar is at the top or at the bottom of the screen
+        if (sourceTopLeftY / monitor.height > 0.3) {
+            tipy = sourceTopLeftY - height; // If it is at the bottom, place the tooltip above instead of below
+        }
         this.actor.set_position(tipx, tipy);
-    },
-    open: function (animate) {
+    }
+    open(animate) {
         if (this.isOpen) {
             return;
         }
@@ -695,26 +807,24 @@ const TipMenu = new Lang.Class({
         this._shift();
         this.actor.raise_top();
         this.emit('open-state-changed', true);
-    },
-    close: function (animate) {
+    }
+    close(animate) {
         this.isOpen = false;
         this.actor.hide();
         this.emit('open-state-changed', false);
     }
-});
+}
 
-const TipBox = new Lang.Class({
-    Name: 'SystemMonitor.TipBox',
-
-    _init: function () {
+const TipBox = class SystemMonitor_TipBox {
+    constructor() {
         this.actor = new St.BoxLayout({reactive: true});
         this.actor._delegate = this;
-        this.set_tip(new TipMenu(this.actor))
+        this.set_tip(new TipMenu(this.actor));
         this.in_to = this.out_to = 0;
-        this.actor.connect('enter-event', Lang.bind(this, this.on_enter));
-        this.actor.connect('leave-event', Lang.bind(this, this.on_leave));
-    },
-    set_tip: function (tipmenu) {
+        this.actor.connect('enter-event', this.on_enter.bind(this));
+        this.actor.connect('leave-event', this.on_leave.bind(this));
+    }
+    set_tip(tipmenu) {
         if (this.tipmenu) {
             this.tipmenu.destroy();
         }
@@ -723,8 +833,8 @@ const TipBox = new Lang.Class({
             Main.uiGroup.add_actor(this.tipmenu.actor);
             this.hide_tip();
         }
-    },
-    show_tip: function () {
+    }
+    show_tip() {
         if (!this.tipmenu) {
             return;
         }
@@ -733,8 +843,8 @@ const TipBox = new Lang.Class({
             Mainloop.source_remove(this.in_to);
             this.in_to = 0;
         }
-    },
-    hide_tip: function () {
+    }
+    hide_tip() {
         if (!this.tipmenu) {
             return;
         }
@@ -747,8 +857,8 @@ const TipBox = new Lang.Class({
             Mainloop.source_remove(this.in_to);
             this.in_to = 0;
         }
-    },
-    on_enter: function () {
+    }
+    on_enter() {
         let show_tooltip = Schema.get_boolean('show-tooltip');
 
         if (!show_tooltip) {
@@ -761,22 +871,20 @@ const TipBox = new Lang.Class({
         }
         if (!this.in_to) {
             this.in_to = Mainloop.timeout_add(500,
-                Lang.bind(this,
-                    this.show_tip));
+                this.show_tip.bind(this));
         }
-    },
-    on_leave: function () {
+    }
+    on_leave() {
         if (this.in_to) {
             Mainloop.source_remove(this.in_to);
             this.in_to = 0;
         }
         if (!this.out_to) {
             this.out_to = Mainloop.timeout_add(500,
-                Lang.bind(this,
-                    this.hide_tip));
+                this.hide_tip.bind(this));
         }
-    },
-    destroy: function () {
+    }
+    destroy() {
         if (this.in_to) {
             Mainloop.source_remove(this.in_to);
             this.in_to = 0;
@@ -788,23 +896,22 @@ const TipBox = new Lang.Class({
         }
 
         this.actor.destroy();
-    },
-});
+    }
+}
 
-const ElementBase = new Lang.Class({
-    Name: 'SystemMonitor.ElementBase',
-    Extends: TipBox,
+const ElementBase = class SystemMonitor_ElementBase extends TipBox {
+    constructor(properties) {
+        super();
+        this.elt = '';
+        this.item_name = _('');
+        this.color_name = [];
+        this.text_items = [];
+        this.menu_items = [];
+        this.menu_visible = true;
 
-    elt: '',
-    item_name: _(''),
-    color_name: [],
-    text_items: [],
-    menu_items: [],
-    menu_visible: true,
+        Object.assign(this, properties);
 
-    _init: function () {
         //            TipBox.prototype._init.apply(this, arguments);
-        this.parent(arguments);
         this.vals = [];
         this.tip_labels = [];
         this.tip_vals = [];
@@ -814,70 +921,67 @@ const ElementBase = new Lang.Class({
         for (let color in this.color_name) {
             let name = this.elt + '-' + this.color_name[color] + '-color';
             let clutterColor = color_from_string(Schema.get_string(name));
-            Schema.connect('changed::' + name, Lang.bind(
-                clutterColor, function (schema, key) {
-                    this.clutterColor = color_from_string(Schema.get_string(key));
-                }));
-            Schema.connect('changed::' + name,
-                Lang.bind(this,
-                    function () {
-                        this.chart.actor.queue_repaint();
-                    }));
+            Schema.connect('changed::' + name, (schema, key) => {
+                this.clutterColor = color_from_string(Schema.get_string(key));
+            });
+            Schema.connect('changed::' + name, () => {
+                this.chart.actor.queue_repaint();
+            });
             this.colors.push(clutterColor);
         }
 
-        this.chart = new Chart(Schema.get_int(this.elt + '-graph-width'), IconSize, this);
-        Schema.connect('changed::background',
-            Lang.bind(this,
-                function () {
-                    this.chart.actor.queue_repaint();
-                }));
+        let element_width = Schema.get_int(this.elt + '-graph-width');
+        if (Style.get('') === '-compact') {
+            element_width = Math.round(element_width / 1.5);
+        }
+        this.chart = new Chart(element_width, IconSize, this);
+
+        Schema.connect('changed::background', () => {
+            this.chart.actor.queue_repaint();
+        });
 
         this.actor.visible = Schema.get_boolean(this.elt + '-display');
         Schema.connect(
-            'changed::' + this.elt + '-display',
-            Lang.bind(this,
-                function (schema, key) {
-                    this.actor.visible = Schema.get_boolean(key);
-                }));
+            'changed::' + this.elt + '-display', (schema, key) => {
+                this.actor.visible = Schema.get_boolean(key);
+            });
 
         this.interval = l_limit(Schema.get_int(this.elt + '-refresh-time'));
         this.timeout = Mainloop.timeout_add(
             this.interval,
-            Lang.bind(this, this.update)
+            this.update.bind(this),
+            GLib.PRIORITY_DEFAULT_IDLE
         );
+
         Schema.connect(
             'changed::' + this.elt + '-refresh-time',
-            Lang.bind(this,
-                function (schema, key) {
-                    Mainloop.source_remove(this.timeout);
-                    this.timeout = 0;
-                    this.interval = l_limit(Schema.get_int(key));
-                    this.timeout = Mainloop.timeout_add(
-                        this.interval, Lang.bind(this, this.update));
-                }));
-        Schema.connect('changed::' + this.elt + '-graph-width',
-            Lang.bind(this.chart, this.chart.resize));
+            (schema, key) => {
+                Mainloop.source_remove(this.timeout);
+                this.timeout = null;
+                this.interval = l_limit(Schema.get_int(key));
+                this.timeout = Mainloop.timeout_add(
+                    this.interval, this.update.bind(this), GLib.PRIORITY_DEFAULT_IDLE);
+            });
+        Schema.connect('changed::' + this.elt + '-graph-width', this.resize.bind(this));
 
         if (this.elt === 'thermal') {
             Schema.connect('changed::thermal-threshold',
-                Lang.bind(this,
-                    function () {
-                        Mainloop.source_remove(this.timeout);
-                        this.timeout = 0;
-                        this.reset_style();
-                        this.timeout = Mainloop.timeout_add(
-                            this.interval, Lang.bind(this, this.update));
-                    }));
+                () => {
+                    Mainloop.source_remove(this.timeout);
+                    this.timeout = null;
+                    this.reset_style();
+                    this.timeout = Mainloop.timeout_add(
+                        this.interval, this.update.bind(this), GLib.PRIORITY_DEFAULT_IDLE);
+                });
         }
 
         this.label = new St.Label({text: this.elt === 'memory' ? _('mem') : _(this.elt),
             style_class: Style.get('sm-status-label')});
         change_text.call(this);
-        Schema.connect('changed::' + this.elt + '-show-text', Lang.bind(this, change_text));
+        Schema.connect('changed::' + this.elt + '-show-text', change_text.bind(this));
 
         this.menu_visible = Schema.get_boolean(this.elt + '-show-menu');
-        Schema.connect('changed::' + this.elt + '-show-menu', Lang.bind(this, change_menu));
+        Schema.connect('changed::' + this.elt + '-show-menu', change_menu.bind(this));
 
         this.actor.add_actor(this.label);
         this.text_box = new St.BoxLayout();
@@ -889,10 +993,10 @@ const ElementBase = new Lang.Class({
         }
         this.actor.add_actor(this.chart.actor);
         change_style.call(this);
-        Schema.connect('changed::' + this.elt + '-style', Lang.bind(this, change_style));
+        Schema.connect('changed::' + this.elt + '-style', change_style.bind(this));
         this.menu_items = this.create_menu_items();
-    },
-    tip_format: function (unit) {
+    }
+    tip_format(unit) {
         if (typeof (unit) === 'undefined') {
             unit = '%';
         }
@@ -907,22 +1011,21 @@ const ElementBase = new Lang.Class({
             let tipline = new TipItem();
             this.tipmenu.addMenuItem(tipline);
             tipline.actor.add(new St.Label({text: _(this.color_name[i])}));
-            this.tip_labels[i] = new St.Label();
+            this.tip_labels[i] = new St.Label({text: ''});
             tipline.actor.add(this.tip_labels[i]);
 
             this.tip_unit_labels[i] = new St.Label({text: unit[i]});
             tipline.actor.add(this.tip_unit_labels[i]);
             this.tip_vals[i] = 0;
         }
-    },
-    /*        set_tip_unit: function(unit) {
-              for (let i = 0;i < this.tip_unit_labels.length;i++) {
-              this.tip_unit_labels[i].text = unit[i];
-              }
-              },*/
-    update: function () {
+    }
+    //        set_tip_unit: function(unit) {
+    //           for (let i = 0;i < this.tip_unit_labels.length;i++) {
+    //           this.tip_unit_labels[i].text = unit[i];
+    //           }
+    //           }
+    update() {
         if (!this.menu_visible && !this.actor.visible) {
-            this.timeout = 0;
             return false;
         }
         this.refresh();
@@ -932,14 +1035,16 @@ const ElementBase = new Lang.Class({
         }
         this.chart.update();
         for (let i = 0; i < this.tip_vals.length; i++) {
-            this.tip_labels[i].text = this.tip_vals[i].toString();
+            if (this.tip_labels[i]) {
+                this.tip_labels[i].text = this.tip_vals[i].toString();
+            }
         }
         return true;
-    },
-    reset_style: function () {
+    }
+    reset_style() {
         this.text_items[0].set_style('color: rgba(255, 255, 255, 1)');
-    },
-    threshold: function () {
+    }
+    threshold() {
         if (Schema.get_int('thermal-threshold')) {
             if (this.temp_over_threshold) {
                 this.text_items[0].set_style('color: rgba(255, 0, 0, 1)');
@@ -947,40 +1052,45 @@ const ElementBase = new Lang.Class({
                 this.text_items[0].set_style('color: rgba(255, 255, 255, 1)');
             }
         }
-    },
-    destroy: function () {
+    }
+    resize(schema, key) {
+        let width = Schema.get_int(key);
+        if (Style.get('') === '-compact') {
+            width = Math.round(width / 1.5);
+        }
+        this.chart.resize(width);
+    }
+    destroy() {
         TipBox.prototype.destroy.call(this);
         if (this.timeout) {
             Mainloop.source_remove(this.timeout);
-            this.timeout = 0;
+            this.timeout = null;
         }
     }
-});
-const Battery = new Lang.Class({
-    Name: 'SystemMonitor.Battery',
-    Extends: ElementBase,
+}
 
-    elt: 'battery',
-    item_name: _('Battery'),
-    color_name: ['batt0'],
-    max: 100,
+const Battery = class SystemMonitor_Battery extends ElementBase {
+    constructor() {
+        super({
+            elt: 'battery',
+            item_name: _('Battery'),
+            color_name: ['batt0'],
+            icon: '. GThemedIcon battery-good-symbolic battery-good'
+        });
 
-    _init: function () {
-        this.item_name = _('Battery');
+        this.max = 100;
         this.icon_hidden = false;
         this.percentage = 0;
         this.timeString = '-- ';
-        this._proxy = StatusArea.aggregateMenu._power._proxy
+        this._proxy = StatusArea.aggregateMenu._power._proxy;
         if (typeof (this._proxy) === 'undefined') {
             this._proxy = StatusArea.battery._proxy;
         }
-        this.powerSigID = this._proxy.connect('g-properties-changed', Lang.bind(this, this.update_battery));
+        this.powerSigID = this._proxy.connect('g-properties-changed', this.update_battery.bind(this));
 
         // need to specify a default icon, since the contructor completes before UPower callback
-        this.icon = '. GThemedIcon battery-good-symbolic battery-good';
         this.gicon = Gio.icon_new_for_string(this.icon);
 
-        this.parent()
         this.tip_format('%');
 
         this.update_battery();
@@ -988,19 +1098,19 @@ const Battery = new Lang.Class({
         // this.hide_system_icon();
         this.update();
 
-        // Schema.connect('changed::' + this.elt + '-hidesystem', Lang.bind(this, this.hide_system_icon));
-        Schema.connect('changed::' + this.elt + '-time', Lang.bind(this, this.update_tips));
-    },
-    refresh: function () {
+        // Schema.connect('changed::' + this.elt + '-hidesystem', this.hide_system_icon.bind(this));
+        Schema.connect('changed::' + this.elt + '-time', this.update_tips.bind(this));
+    }
+    refresh() {
         // do nothing here?
-    },
-    update_battery: function () {
+    }
+    update_battery() {
         // callback function for when battery stats updated.
         let battery_found = false;
         let isBattery = false;
         if (typeof (this._proxy.GetDevicesRemote) === 'undefined') {
             let device_type = this._proxy.Type;
-            isBattery = (device_type === Power.UPower.DeviceKind.BATTERY);
+            isBattery = (device_type === UPower.DeviceKind.BATTERY);
             if (isBattery) {
                 battery_found = true;
                 let icon = this._proxy.IconName;
@@ -1008,15 +1118,15 @@ const Battery = new Lang.Class({
                 let seconds = this._proxy.TimeToEmpty;
                 this.update_battery_value(seconds, percentage, icon);
             } else {
-                // log("SM: No battery found");
+                // log("[System monitor] No battery found");
                 this.actor.hide();
                 this.menu_visible = false;
                 build_menu_info();
             }
         } else {
-            this._proxy.GetDevicesRemote(Lang.bind(this, function (devices, error) {
+            this._proxy.GetDevicesRemote((devices, error) => {
                 if (error) {
-                    log('SM: Power proxy error: ' + error)
+                    log('[System monitor] Power proxy error: ' + error);
                     this.actor.hide();
                     this.menu_visible = false;
                     build_menu_info();
@@ -1027,12 +1137,7 @@ const Battery = new Lang.Class({
                 for (let i = 0; i < result.length; i++) {
                     let [device_id, device_type, icon, percentage, state, seconds] = result[i];
 
-                    if (Compat.versionCompare(shell_Version, '3.9')) {
-                        isBattery = (device_type === Power.UPower.DeviceKind.BATTERY);
-                    } else {
-                        isBattery = (device_type === Power.UPDeviceType.BATTERY);
-                    }
-
+                    isBattery = (device_type === UPower.DeviceKind.BATTERY);
                     if (isBattery) {
                         battery_found = true;
                         this.update_battery_value(seconds, percentage, icon);
@@ -1041,15 +1146,15 @@ const Battery = new Lang.Class({
                 }
 
                 if (!battery_found) {
-                    // log("SM: No battery found")
+                    // log("[System monitor] No battery found");
                     this.actor.hide();
                     this.menu_visible = false;
                     build_menu_info();
                 }
-            }));
+            });
         }
-    },
-    update_battery_value: function (seconds, percentage, icon) {
+    }
+    update_battery_value(seconds, percentage, icon) {
         if (seconds > 60) {
             let time = Math.round(seconds / 60);
             let minutes = time % 60;
@@ -1068,8 +1173,8 @@ const Battery = new Lang.Class({
             this.menu_visible = true;
             build_menu_info();
         }
-    },
-    hide_system_icon: function (override) {
+    }
+    hide_system_icon(override) {
         let value = Schema.get_boolean(this.elt + '-hidesystem');
         if (!override) {
             value = false;
@@ -1101,19 +1206,32 @@ const Battery = new Lang.Class({
             this.icon_hidden = false;
             // Main.panel._updatePanel('right');
         }
-    },
-
-    update_tips: function () {
+    }
+    get_battery_unit() {
+        let unitString;
         let value = Schema.get_boolean(this.elt + '-time');
+
         if (value) {
-            this.text_items[2].text = this.menu_items[1].text = 'h';
+            unitString = 'h';
         } else {
-            this.text_items[2].text = this.menu_items[1].text = '%';
+            unitString = '%';
+        }
+
+        return unitString;
+    }
+    update_tips() {
+        let unitString = this.get_battery_unit();
+
+        if (Schema.get_boolean(this.elt + '-display')) {
+            this.text_items[2].text = unitString;
+        }
+        if (Schema.get_boolean(this.elt + '-show-menu')) {
+            this.menu_items[1].text = unitString;
         }
 
         this.update();
-    },
-    _apply: function () {
+    }
+    _apply() {
         let displayString;
         let value = Schema.get_boolean(this.elt + '-time');
         if (value) {
@@ -1121,51 +1239,57 @@ const Battery = new Lang.Class({
         } else {
             displayString = this.percentage.toString()
         }
-        this.text_items[1].text = this.menu_items[0].text = displayString;
-        this.text_items[0].gicon = this.gicon;
+        if (Schema.get_boolean(this.elt + '-display')) {
+            this.text_items[0].gicon = this.gicon;
+            this.text_items[1].text = displayString;
+        }
+        if (Schema.get_boolean(this.elt + '-show-menu')) {
+            this.menu_items[0].text = displayString;
+        }
         this.vals = [this.percentage];
         this.tip_vals[0] = Math.round(this.percentage);
-    },
-    create_text_items: function () {
+    }
+    create_text_items() {
         return [
             new St.Icon({
                 gicon: Gio.icon_new_for_string(this.icon),
                 style_class: Style.get('sm-status-icon')}),
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-status-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
-                text: '%',
+                text: this.get_battery_unit(),
                 style_class: Style.get('sm-perc-label'),
                 y_align: Clutter.ActorAlign.CENTER})
         ];
-    },
-    create_menu_items: function () {
+    }
+    create_menu_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
-                text: '%',
+                text: this.get_battery_unit(),
                 style_class: Style.get('sm-label')})
         ];
-    },
-    destroy: function () {
+    }
+    destroy() {
         ElementBase.prototype.destroy.call(this);
         this._proxy.disconnect(this.powerSigID);
     }
-});
+}
 
-const Cpu = new Lang.Class({
-    Name: 'SystemMonitor.Cpu',
-    Extends: ElementBase,
+const Cpu = class SystemMonitor_Cpu extends ElementBase {
+    constructor(cpuid) {
+        super({
+            elt: 'cpu',
+            item_name: _('CPU'),
+            color_name: ['user', 'system', 'nice', 'iowait', 'other'],
+            cpuid: -1 // cpuid is -1 when all cores are displayed in the same graph
+        });
+        this.max = 100;
 
-    elt: 'cpu',
-    item_name: _('CPU'),
-    color_name: ['user', 'system', 'nice', 'iowait', 'other'],
-    max: 100,
-    cpuid: -1, // cpuid is -1 when all cores are displayed in the same graph
-
-    _init: function (cpuid) {
         this.cpuid = cpuid;
         this.gtop = new GTop.glibtop_cpu();
         this.last = [0, 0, 0, 0, 0];
@@ -1186,11 +1310,10 @@ const Cpu = new Lang.Class({
             this.item_name += ' ' + (cpuid + 1);
         } // append cpu number to cpu name in popup
         // ElementBase.prototype._init.call(this);
-        this.parent()
         this.tip_format();
         this.update();
-    },
-    refresh: function () {
+    }
+    refresh() {
         GTop.glibtop_get_cpu(this.gtop);
         // display global cpu usage on 1 graph
         if (this.cpuid === -1) {
@@ -1236,43 +1359,41 @@ const Cpu = new Lang.Class({
             }
         }
 
-        /*
-        GTop.glibtop_get_cpu(this.gtop);
-        // display global cpu usage on 1 graph
-        if (this.cpuid == -1) {
-            this.current[0] = this.gtop.user;
-            this.current[1] = this.gtop.sys;
-            this.current[2] = this.gtop.nice;
-            this.current[3] = this.gtop.idle;
-            this.current[4] = this.gtop.iowait;
-        } else {
-            // display cpu usage for given core
-            this.current[0] = this.gtop.xcpu_user[this.cpuid];
-            this.current[1] = this.gtop.xcpu_sys[this.cpuid];
-            this.current[2] = this.gtop.xcpu_nice[this.cpuid];
-            this.current[3] = this.gtop.xcpu_idle[this.cpuid];
-            this.current[4] = this.gtop.xcpu_iowait[this.cpuid];
-        }
-
-        let delta = 0;
-        if (this.cpuid == -1)
-            delta = (this.gtop.total - this.last_total)/(100*this.total_cores);
-        else
-            delta = (this.gtop.xcpu_total[this.cpuid] - this.last_total)/100;
-
-        if (delta > 0) {
-            for (let i = 0;i < 5;i++) {
-                this.usage[i] = Math.round((this.current[i] - this.last[i])/delta);
-                this.last[i] = this.current[i];
-            }
-            if (this.cpuid == -1)
-                this.last_total = this.gtop.total;
-            else
-                this.last_total = this.gtop.xcpu_total[this.cpuid];
-        }
-        */
-    },
-    _apply: function () {
+        // GTop.glibtop_get_cpu(this.gtop);
+        // // display global cpu usage on 1 graph
+        // if (this.cpuid == -1) {
+        //     this.current[0] = this.gtop.user;
+        //     this.current[1] = this.gtop.sys;
+        //     this.current[2] = this.gtop.nice;
+        //     this.current[3] = this.gtop.idle;
+        //     this.current[4] = this.gtop.iowait;
+        // } else {
+        //     // display cpu usage for given core
+        //     this.current[0] = this.gtop.xcpu_user[this.cpuid];
+        //     this.current[1] = this.gtop.xcpu_sys[this.cpuid];
+        //     this.current[2] = this.gtop.xcpu_nice[this.cpuid];
+        //     this.current[3] = this.gtop.xcpu_idle[this.cpuid];
+        //     this.current[4] = this.gtop.xcpu_iowait[this.cpuid];
+        // }
+        //
+        // let delta = 0;
+        // if (this.cpuid == -1)
+        //     delta = (this.gtop.total - this.last_total)/(100*this.total_cores);
+        // else
+        //     delta = (this.gtop.xcpu_total[this.cpuid] - this.last_total)/100;
+        //
+        // if (delta > 0) {
+        //     for (let i = 0;i < 5;i++) {
+        //         this.usage[i] = Math.round((this.current[i] - this.last[i])/delta);
+        //         this.last[i] = this.current[i];
+        //     }
+        //     if (this.cpuid == -1)
+        //         this.last_total = this.gtop.total;
+        //     else
+        //         this.last_total = this.gtop.xcpu_total[this.cpuid];
+        // }
+    }
+    _apply() {
         let percent = 0;
         if (this.cpuid === -1) {
             percent = Math.round(((100 * this.total_cores) - this.usage[3]) /
@@ -1293,9 +1414,9 @@ const Cpu = new Lang.Class({
         for (let i = 0; i < 5; i++) {
             this.tip_vals[i] = Math.round(this.vals[i]);
         }
-    },
+    }
 
-    get_cores: function () {
+    get_cores() {
         // Getting xcpu_total makes gjs 1.29.18 segfault
         // let cores = 0;
         // GTop.glibtop_get_cpu(this.gtop);
@@ -1306,30 +1427,32 @@ const Cpu = new Lang.Class({
         // }
         // return cores;
         return 1;
-    },
-    create_text_items: function () {
+    }
+    create_text_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-status-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
                 text: '%', style_class: Style.get('sm-perc-label'),
                 y_align: Clutter.ActorAlign.CENTER})
         ];
-    },
-    create_menu_items: function () {
+    }
+    create_menu_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: '%',
                 style_class: Style.get('sm-label')})
         ];
     }
-});
+}
 
-/* Check if one graph per core must be displayed and create the
-   appropriate number of cpu items */
+// Check if one graph per core must be displayed and create the
+//    appropriate number of cpu items
 function createCpus() {
     let array = [];
     let numcores = 1;
@@ -1360,53 +1483,54 @@ function createCpus() {
     return array;
 }
 
-const Disk = new Lang.Class({
-    Name: 'SystemMonitor.Disk',
-    Extends: ElementBase,
-
-    elt: 'disk',
-    item_name: _('Disk'),
-    color_name: ['read', 'write'],
-
-    _init: function () {
-        this.item_name = _('Disk');
+const Disk = class SystemMonitor_Disk extends ElementBase {
+    constructor() {
+        super({
+            elt: 'disk',
+            item_name: _('Disk'),
+            color_name: ['read', 'write']
+        });
         this.mounts = MountsMonitor.get_mounts();
-        MountsMonitor.add_listener(Lang.bind(this, this.update_mounts));
+        MountsMonitor.add_listener(this.update_mounts.bind(this));
         this.last = [0, 0];
         this.usage = [0, 0];
         this.last_time = 0;
-        this.parent()
         this.tip_format(_('MiB/s'));
         this.update();
-    },
-    update_mounts: function (mounts) {
+    }
+    update_mounts(mounts) {
         this.mounts = mounts;
-    },
-    refresh: function () {
+    }
+    refresh() {
         let accum = [0, 0];
-        let lines = Shell.get_file_contents_utf8_sync('/proc/diskstats').split('\n');
 
-        for (let i = 0; i < lines.length; i++) {
-            let line = lines[i];
-            let entry = line.trim().split(/[\s]+/);
-            if (typeof (entry[1]) === 'undefined') {
-                break;
-            }
-            accum[0] += parseInt(entry[5]);
-            accum[1] += parseInt(entry[9]);
-        }
+        let file = Gio.file_new_for_path('/proc/diskstats');
+        file.load_contents_async(null, (source, result) => {
+            let as_r = source.load_contents_finish(result);
+            let lines = parse_bytearray(as_r[1]).toString().split('\n');
 
-        let time = GLib.get_monotonic_time() / 1000;
-        let delta = (time - this.last_time) / 1000;
-        if (delta > 0) {
-            for (let i = 0; i < 2; i++) {
-                this.usage[i] = ((accum[i] - this.last[i]) / delta / 1024 / 8);
-                this.last[i] = accum[i];
+            for (let i = 0; i < lines.length; i++) {
+                let line = lines[i];
+                let entry = line.trim().split(/[\s]+/);
+                if (typeof (entry[1]) === 'undefined') {
+                    break;
+                }
+                accum[0] += parseInt(entry[5]);
+                accum[1] += parseInt(entry[9]);
             }
-        }
-        this.last_time = time;
-    },
-    _apply: function () {
+
+            let time = GLib.get_monotonic_time() / 1000;
+            let delta = (time - this.last_time) / 1000;
+            if (delta > 0) {
+                for (let i = 0; i < 2; i++) {
+                    this.usage[i] = ((accum[i] - this.last[i]) / delta / 1024 / 8);
+                    this.last[i] = accum[i];
+                }
+            }
+            this.last_time = time;
+        });
+    }
+    _apply() {
         this.vals = this.usage.slice();
         for (let i = 0; i < 2; i++) {
             if (this.usage[i] < 10) {
@@ -1418,13 +1542,14 @@ const Disk = new Lang.Class({
         this.tip_vals = [this.usage[0], this.usage[1]];
         this.menu_items[0].text = this.text_items[1].text = this.tip_vals[0].toLocaleString(Locale);
         this.menu_items[3].text = this.text_items[4].text = this.tip_vals[1].toLocaleString(Locale);
-    },
-    create_text_items: function () {
+    }
+    create_text_items() {
         return [
             new St.Label({
                 text: _('R'),
                 style_class: Style.get('sm-status-label')}),
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-disk-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
@@ -1435,6 +1560,7 @@ const Disk = new Lang.Class({
                 text: _('W'),
                 style_class: Style.get('sm-status-label')}),
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-disk-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
@@ -1442,10 +1568,11 @@ const Disk = new Lang.Class({
                 style_class: Style.get('sm-disk-unit-label'),
                 y_align: Clutter.ActorAlign.CENTER})
         ];
-    },
-    create_menu_items: function () {
+    }
+    create_menu_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: Style.diskunits(),
@@ -1454,79 +1581,99 @@ const Disk = new Lang.Class({
                 text: _('R'),
                 style_class: Style.get('sm-label')}),
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: Style.diskunits(),
                 style_class: Style.get('sm-label')}),
             new St.Label({
-                text: _('W'),
+                text: ' ' + _('W'),
                 style_class: Style.get('sm-label')})
         ];
-    },
-});
+    }
+}
 
-const Freq = new Lang.Class({
-    Name: 'SystemMonitor.Freq',
-    Extends: ElementBase,
-
-    elt: 'freq',
-    item_name: _('Freq'),
-    color_name: ['freq'],
-    _init: function () {
-        this.item_name = _('Freq');
+const Freq = class SystemMonitor_Freq extends ElementBase {
+    constructor() {
+        super({
+            elt: 'freq',
+            item_name: _('Freq'),
+            color_name: ['freq']
+        });
         this.freq = 0;
-        this.parent()
         this.tip_format('MHz');
         this.update();
-    },
-    refresh: function () {
+    }
+    refresh() {
         let total_frequency = 0;
         let num_cpus = GTop.glibtop_get_sysinfo().ncpu;
-        for (let i = 0; i < num_cpus; i++) {
-          total_frequency += parseInt(Shell.get_file_contents_utf8_sync('/sys/devices/system/cpu/cpu' + i + '/cpufreq/scaling_cur_freq'));
-        }
-        this.freq = Math.round(total_frequency / num_cpus / 1000);
-    },
-    _apply: function () {
+        let i = 0;
+        let file = Gio.file_new_for_path(`/sys/devices/system/cpu/cpu${i}/cpufreq/scaling_cur_freq`);
+        var that = this;
+        file.load_contents_async(null, function cb(source, result) {
+            let as_r = source.load_contents_finish(result);
+            total_frequency += parseInt(parse_bytearray(as_r[1]));
+
+            if (++i >= num_cpus) {
+                that.freq = Math.round(total_frequency / num_cpus / 1000);
+            } else {
+                file = Gio.file_new_for_path(`/sys/devices/system/cpu/cpu${i}/cpufreq/scaling_cur_freq`);
+                file.load_contents_async(null, cb.bind(that));
+            }
+        });
+    }
+    _apply() {
         let value = this.freq.toString();
         this.vals[0] = this.freq;
         this.text_items[0].text = value + ' ';
         this.vals[0] = value;
         this.tip_vals[0] = value;
-        this.menu_items[0].text = value;
-    },
-    create_text_items: function () {
+        if (Style.get('') !== '-compact') {
+            this.menu_items[0].text = value;
+        } else {
+            this.menu_items[0].text = this._pad(value, 4);
+        }
+    }
+    // pad a string with leading spaces
+    _pad(number, length) {
+        var str = '' + number;
+        while (str.length < length) {
+            str = ' ' + str;
+        }
+        return str;
+    }
+    create_text_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-big-status-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
                 text: 'MHz', style_class: Style.get('sm-perc-label'),
                 y_align: Clutter.ActorAlign.CENTER})
         ];
-    },
-    create_menu_items: function () {
+    }
+    create_menu_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: 'MHz',
                 style_class: Style.get('sm-label')})
         ];
     }
-});
+}
 
-const Mem = new Lang.Class({
-    Name: 'SystemMonitor.Mem',
-    Extends: ElementBase,
+const Mem = class SystemMonitor_Mem extends ElementBase {
+    constructor() {
+        super({
+            elt: 'memory',
+            item_name: _('Memory'),
+            color_name: ['program', 'buffer', 'cache']
+        });
+        this.max = 1;
 
-    elt: 'memory',
-    item_name: _('Memory'),
-    color_name: ['program', 'buffer', 'cache'],
-    max: 1,
-
-    _init: function () {
-        this.item_name = _('Memory');
         this.gtop = new GTop.glibtop_mem();
         this.mem = [0, 0, 0];
 
@@ -1541,11 +1688,10 @@ const Mem = new Lang.Class({
             this._unitConversion *= 1024 / this._decimals;
         }
 
-        this.parent()
         this.tip_format();
         this.update();
-    },
-    refresh: function () {
+    }
+    refresh() {
         GTop.glibtop_get_mem(this.gtop);
         if (this.useGiB) {
             this.mem[0] = Math.round(this.gtop.user / this._unitConversion);
@@ -1562,20 +1708,20 @@ const Mem = new Lang.Class({
             this.mem[2] = Math.round(this.gtop.cached / this._unitConversion);
             this.total = Math.round(this.gtop.total / this._unitConversion);
         }
-    },
-    _pad: function (number) {
+    }
+    _pad(number) {
         if (this.useGiB) {
             if (number < 1) {
                 // examples: 0.01, 0.10, 0.88
-                return number.toFixed(2);
+                return number.toLocaleString(Locale, {minimumFractionDigits: 2, maximumFractionDigits: 2});
             }
             // examples: 5.85, 16.0, 128
-            return number.toPrecision(3);
+            return number.toLocaleString(Locale, {minimumSignificantDigits: 3, maximumSignificantDigits: 3});
         }
 
-        return number;
-    },
-    _apply: function () {
+        return number.toLocaleString(Locale);
+    }
+    _apply() {
         if (this.total === 0) {
             this.vals = this.tip_vals = [0, 0, 0];
         } else {
@@ -1587,54 +1733,56 @@ const Mem = new Lang.Class({
         this.text_items[0].text = this.tip_vals[0].toString();
         this.menu_items[0].text = this.tip_vals[0].toLocaleString(Locale);
         if (Style.get('') !== '-compact') {
-            this.menu_items[3].text = this._pad(this.mem[0]).toLocaleString(Locale) +
-                '  /  ' + this._pad(this.total).toLocaleString(Locale);
+            this.menu_items[3].text = this._pad(this.mem[0]) +
+                ' / ' + this._pad(this.total);
         } else {
-            this.menu_items[3].text = this._pad(this.mem[0]).toLocaleString(Locale) +
-                '/' + this._pad(this.total).toLocaleString(Locale);
+            this.menu_items[3].text = this._pad(this.mem[0]) +
+                '/' + this._pad(this.total);
         }
-    },
-    create_text_items: function () {
+    }
+    create_text_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-status-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
                 text: '%', style_class: Style.get('sm-perc-label'),
                 y_align: Clutter.ActorAlign.CENTER})
         ];
-    },
-    create_menu_items: function () {
+    }
+    create_menu_items() {
         let unit = _('MiB');
         if (this.useGiB) {
             unit = _('GiB');
         }
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: '%',
                 style_class: Style.get('sm-label')}),
-            new St.Label(),
             new St.Label({
+                text: '',
+                style_class: Style.get('sm-label')}),
+            new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({text: unit,
                 style_class: Style.get('sm-label')})
         ];
     }
-});
+}
 
-const Net = new Lang.Class({
-    Name: 'SystemMonitor.Net',
-    Extends: ElementBase,
-
-    elt: 'net',
-    item_name: _('Net'),
-    color_name: ['down', 'downerrors', 'up', 'uperrors', 'collisions'],
-    speed_in_bits: false,
-
-    _init: function () {
-        this.item_name = _('Net');
+const Net = class SystemMonitor_Net extends ElementBase {
+    constructor() {
+        super({
+            elt: 'net',
+            item_name: _('Net'),
+            color_name: ['down', 'downerrors', 'up', 'uperrors', 'collisions']
+        });
+        this.speed_in_bits = false;
         this.ifs = [];
         this.client = libnm_glib ? NM.Client.new() : NM.Client.new(null);
         this.update_iface_list();
@@ -1655,27 +1803,26 @@ const Net = new Lang.Class({
         this.last = [0, 0, 0, 0, 0];
         this.usage = [0, 0, 0, 0, 0];
         this.last_time = 0;
-        this.parent()
         this.tip_format([_('KiB/s'), '/s', _('KiB/s'), '/s', '/s']);
         this.update_units();
-        Schema.connect('changed::' + this.elt + '-speed-in-bits', Lang.bind(this, this.update_units));
+        Schema.connect('changed::' + this.elt + '-speed-in-bits', this.update_units.bind(this));
         try {
             let iface_list = this.client.get_devices();
-            this.NMsigID = []
+            this.NMsigID = [];
             for (let j = 0; j < iface_list.length; j++) {
-                this.NMsigID[j] = iface_list[j].connect('state-changed', Lang.bind(this, this.update_iface_list));
+                this.NMsigID[j] = iface_list[j].connect('state-changed', this.update_iface_list.bind(this));
             }
         } catch (e) {
             global.logError('Please install Network Manager Gobject Introspection Bindings: ' + e);
         }
         this.update();
-    },
-    update_units: function () {
+    }
+    update_units() {
         this.speed_in_bits = Schema.get_boolean(this.elt + '-speed-in-bits');
-    },
-    update_iface_list: function () {
+    }
+    update_iface_list() {
         try {
-            this.ifs = []
+            this.ifs = [];
             let iface_list = this.client.get_devices();
             for (let j = 0; j < iface_list.length; j++) {
                 if (iface_list[j].state === NetworkManager.DeviceState.ACTIVATED) {
@@ -1685,8 +1832,8 @@ const Net = new Lang.Class({
         } catch (e) {
             global.logError('Please install Network Manager Gobject Introspection Bindings');
         }
-    },
-    refresh: function () {
+    }
+    refresh() {
         let accum = [0, 0, 0, 0, 0];
 
         for (let ifn in this.ifs) {
@@ -1708,18 +1855,18 @@ const Net = new Lang.Class({
             }
         }
         this.last_time = time;
-    },
+    }
 
-    // pad a string with leading 0s
-    _pad: function (number, length) {
+    // pad a string with leading spaces
+    _pad(number, length) {
         var str = '' + number;
         while (str.length < length) {
-            str = '0' + str;
+            str = ' ' + str;
         }
         return str;
-    },
+    }
 
-    _apply: function () {
+    _apply() {
         this.tip_vals = this.usage;
         if (this.speed_in_bits) {
             this.tip_vals[0] = Math.round(this.tip_vals[0] * 8.192);
@@ -1727,35 +1874,51 @@ const Net = new Lang.Class({
             if (this.tip_vals[0] < 1000) {
                 this.text_items[2].text = Style.netunits_kbits();
                 this.menu_items[1].text = this.tip_unit_labels[0].text = _('kbit/s');
-            } else {
+            } else if (this.tip_vals[0] < 1000000) {
                 this.text_items[2].text = Style.netunits_mbits();
                 this.menu_items[1].text = this.tip_unit_labels[0].text = _('Mbit/s');
                 this.tip_vals[0] = (this.tip_vals[0] / 1000).toPrecision(3);
+            } else {
+                this.text_items[2].text = Style.netunits_gbits();
+                this.menu_items[1].text = this.tip_unit_labels[0].text = _('Gbit/s');
+                this.tip_vals[0] = (this.tip_vals[0] / 1000000).toPrecision(3);
             }
             if (this.tip_vals[2] < 1000) {
                 this.text_items[5].text = Style.netunits_kbits();
                 this.menu_items[4].text = this.tip_unit_labels[2].text = _('kbit/s');
-            } else {
+            } else if (this.tip_vals[2] < 1000000) {
                 this.text_items[5].text = Style.netunits_mbits();
                 this.menu_items[4].text = this.tip_unit_labels[2].text = _('Mbit/s');
                 this.tip_vals[2] = (this.tip_vals[2] / 1000).toPrecision(3);
+            } else {
+                this.text_items[5].text = Style.netunits_gbits();
+                this.menu_items[4].text = this.tip_unit_labels[2].text = _('Gbit/s');
+                this.tip_vals[2] = (this.tip_vals[2] / 1000000).toPrecision(3);
             }
         } else {
             if (this.tip_vals[0] < 1024) {
                 this.text_items[2].text = Style.netunits_kbytes();
                 this.menu_items[1].text = this.tip_unit_labels[0].text = _('KiB/s');
-            } else {
+            } else if (this.tip_vals[0] < 1048576) {
                 this.text_items[2].text = Style.netunits_mbytes();
                 this.menu_items[1].text = this.tip_unit_labels[0].text = _('MiB/s');
                 this.tip_vals[0] = (this.tip_vals[0] / 1024).toPrecision(3);
+            } else {
+                this.text_items[2].text = Style.netunits_gbytes();
+                this.menu_items[1].text = this.tip_unit_labels[0].text = _('GiB/s');
+                this.tip_vals[0] = (this.tip_vals[0] / 1048576).toPrecision(3);
             }
             if (this.tip_vals[2] < 1024) {
                 this.text_items[5].text = Style.netunits_kbytes();
                 this.menu_items[4].text = this.tip_unit_labels[2].text = _('KiB/s');
-            } else {
+            } else if (this.tip_vals[2] < 1048576) {
                 this.text_items[5].text = Style.netunits_mbytes();
                 this.menu_items[4].text = this.tip_unit_labels[2].text = _('MiB/s');
                 this.tip_vals[2] = (this.tip_vals[2] / 1024).toPrecision(3);
+            } else {
+                this.text_items[5].text = Style.netunits_gbytes();
+                this.menu_items[4].text = this.tip_unit_labels[2].text = _('GiB/s');
+                this.tip_vals[2] = (this.tip_vals[2] / 1048576).toPrecision(3);
             }
         }
 
@@ -1763,16 +1926,17 @@ const Net = new Lang.Class({
             this.menu_items[0].text = this.text_items[1].text = this.tip_vals[0].toString();
             this.menu_items[3].text = this.text_items[4].text = this.tip_vals[2].toString();
         } else {
-            this.menu_items[0].text = this.text_items[1].text = this._pad(this.tip_vals[0].toString(), 3);
-            this.menu_items[3].text = this.text_items[4].text = this._pad(this.tip_vals[2].toString(), 3);
+            this.menu_items[0].text = this.text_items[1].text = this._pad(this.tip_vals[0].toString(), 4);
+            this.menu_items[3].text = this.text_items[4].text = this._pad(this.tip_vals[2].toString(), 4);
         }
-    },
-    create_text_items: function () {
+    }
+    create_text_items() {
         return [
             new St.Icon({
                 icon_size: 2 * IconSize / 3 * Style.iconsize(),
                 icon_name: 'go-down-symbolic'}),
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-net-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
@@ -1783,6 +1947,7 @@ const Net = new Lang.Class({
                 icon_size: 2 * IconSize / 3 * Style.iconsize(),
                 icon_name: 'go-up-symbolic'}),
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-net-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
@@ -1790,40 +1955,39 @@ const Net = new Lang.Class({
                 style_class: Style.get('sm-net-unit-label'),
                 y_align: Clutter.ActorAlign.CENTER})
         ];
-    },
-    create_menu_items: function () {
+    }
+    create_menu_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: _('KiB/s'),
                 style_class: Style.get('sm-label')}),
             new St.Label({
-                text: _('Down'),
+                text: _(' ↓'),
                 style_class: Style.get('sm-label')}),
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
-                text: _('KiB/s'),
+                text: _(' KiB/s'),
                 style_class: Style.get('sm-label')}),
             new St.Label({
-                text: _('Up'),
+                text: _(' ↑'),
                 style_class: Style.get('sm-label')})
         ];
     }
-});
+}
 
-const Swap = new Lang.Class({
-    Name: 'SystemMonitor.Swap',
-    Extends: ElementBase,
-
-    elt: 'swap',
-    item_name: _('Swap'),
-    color_name: ['used'],
-    max: 1,
-
-    _init: function () {
-        this.item_name = _('Swap');
+const Swap = class SystemMonitor_Swap extends ElementBase {
+    constructor() {
+        super({
+            elt: 'swap',
+            item_name: _('Swap'),
+            color_name: ['used']
+        });
+        this.max = 1;
         this.gtop = new GTop.glibtop_swap();
 
         GTop.glibtop_get_swap(this.gtop);
@@ -1837,11 +2001,10 @@ const Swap = new Lang.Class({
             this._unitConversion *= 1024 / this._decimals;
         }
 
-        this.parent()
         this.tip_format();
         this.update();
-    },
-    refresh: function () {
+    }
+    refresh() {
         GTop.glibtop_get_swap(this.gtop);
         if (this.useGiB) {
             this.swap = Math.round(this.gtop.used / this._unitConversion);
@@ -1852,20 +2015,20 @@ const Swap = new Lang.Class({
             this.swap = Math.round(this.gtop.used / this._unitConversion);
             this.total = Math.round(this.gtop.total / this._unitConversion);
         }
-    },
-    _pad: function (number) {
+    }
+    _pad(number) {
         if (this.useGiB) {
             if (number < 1) {
                 // examples: 0.01, 0.10, 0.88
-                return number.toFixed(2);
+                return number.toLocaleString(Locale, {minimumFractionDigits: 2, maximumFractionDigits: 2});
             }
             // examples: 5.85, 16.0, 128
-            return number.toPrecision(3);
+            return number.toLocaleString(Locale, {minimumSignificantDigits: 3, maximumSignificantDigits: 3});
         }
 
-        return number;
-    },
-    _apply: function () {
+        return number.toLocaleString(Locale);
+    }
+    _apply() {
         if (this.total === 0) {
             this.vals = this.tip_vals = [0];
         } else {
@@ -1875,17 +2038,18 @@ const Swap = new Lang.Class({
         this.text_items[0].text = this.tip_vals[0].toString();
         this.menu_items[0].text = this.tip_vals[0].toString();
         if (Style.get('') !== '-compact') {
-            this.menu_items[3].text = this._pad(this.swap).toLocaleString(Locale) +
-                '  /  ' + this._pad(this.total).toLocaleString(Locale);
+            this.menu_items[3].text = this._pad(this.swap) +
+                ' / ' + this._pad(this.total);
         } else {
-            this.menu_items[3].text = this._pad(this.swap).toLocaleString(Locale) +
-                '/' + this._pad(this.total).toLocaleString(Locale);
+            this.menu_items[3].text = this._pad(this.swap) +
+                '/' + this._pad(this.total);
         }
-    },
+    }
 
-    create_text_items: function () {
+    create_text_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-status-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
@@ -1893,77 +2057,76 @@ const Swap = new Lang.Class({
                 style_class: Style.get('sm-perc-label'),
                 y_align: Clutter.ActorAlign.CENTER})
         ];
-    },
-    create_menu_items: function () {
+    }
+    create_menu_items() {
         let unit = 'MiB';
         if (this.useGiB) {
             unit = 'GiB';
         }
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: '%',
                 style_class: Style.get('sm-label')}),
-            new St.Label(),
             new St.Label({
+                text: '',
+                style_class: Style.get('sm-label')}),
+            new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: _(unit),
                 style_class: Style.get('sm-label')})
         ];
     }
-});
+}
 
-const Thermal = new Lang.Class({
-    Name: 'SystemMonitor.Thermal',
-    Extends: ElementBase,
+const Thermal = class SystemMonitor_Thermal extends ElementBase {
+    constructor() {
+        super({
+            elt: 'thermal',
+            item_name: _('Thermal'),
+            color_name: ['tz0']
+        });
+        this.max = 100;
 
-    elt: 'thermal',
-    item_name: _('Thermal'),
-    color_name: ['tz0'],
-    max: 100,
-    _init: function () {
         this.item_name = _('Thermal');
         this.temperature = '-- ';
         this.fahrenheit_unit = Schema.get_boolean(this.elt + '-fahrenheit-unit');
         this.display_error = true;
-        this.parent()
         this.tip_format(this.temperature_symbol());
-        Schema.connect('changed::' + this.elt + '-sensor-file', Lang.bind(this, this.refresh));
+        Schema.connect('changed::' + this.elt + '-sensor-file', this.refresh.bind(this));
         this.update();
-    },
-    refresh: function () {
+    }
+    refresh() {
         let sfile = Schema.get_string(this.elt + '-sensor-file');
-        if (GLib.file_test(sfile, 1 << 4)) {
+        if (GLib.file_test(sfile, GLib.FileTest.EXISTS)) {
             let file = Gio.file_new_for_path(sfile);
-            file.load_contents_async(null, Lang.bind(this, function (source, result) {
+            file.load_contents_async(null, (source, result) => {
                 let as_r = source.load_contents_finish(result)
-                this.temperature = Math.round(parseInt(as_r[1]) / 1000);
-                if (this.fahrenheit_unit) {
-                    this.temperature = Math.round(this.temperature * 1.8 + 32);
-                }
-            }));
+                this.temperature = Math.round(parseInt(parse_bytearray(as_r[1])) / 1000);
+            });
         } else if (this.display_error) {
             global.logError('error reading: ' + sfile);
             this.display_error = false;
         }
 
         this.fahrenheit_unit = Schema.get_boolean(this.elt + '-fahrenheit-unit');
-    },
-    _apply: function () {
+    }
+    _apply() {
         this.text_items[0].text = this.menu_items[0].text = this.temperature_text();
-        // Making it looks better in chart.
-        // this.vals = [this.temperature / 100];
         this.temp_over_threshold = this.temperature > Schema.get_int('thermal-threshold');
         this.vals = [this.temperature];
         this.tip_vals[0] = this.temperature_text();
-        this.menu_items[1].text = this.temperature_symbol();
+        this.text_items[1].text = this.menu_items[1].text = this.temperature_symbol();
         this.tip_unit_labels[0].text = _(this.temperature_symbol());
-    },
-    create_text_items: function () {
+    }
+    create_text_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-status-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
@@ -1971,99 +2134,100 @@ const Thermal = new Lang.Class({
                 style_class: Style.get('sm-temp-label'),
                 y_align: Clutter.ActorAlign.CENTER})
         ];
-    },
-    create_menu_items: function () {
+    }
+    create_menu_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: this.temperature_symbol(),
                 style_class: Style.get('sm-label')})
         ];
-    },
-    temperature_text: function () {
-        return this.temperature.toString();
-    },
-    temperature_symbol: function () {
-        return this.fahrenheit_unit ? '\u2109' : '\u2103';
     }
-});
+    temperature_text() {
+        let temperature = this.temperature;
+        if (this.fahrenheit_unit) {
+            temperature = Math.round(temperature * 1.8 + 32);
+        }
+        return temperature.toString();
+    }
+    temperature_symbol() {
+        return this.fahrenheit_unit ? '°F' : '°C';
+    }
+}
 
-const Fan = new Lang.Class({
-    Name: 'SystemMonitor.Fan',
-    Extends: ElementBase,
-
-    elt: 'fan',
-    item_name: _('Fan'),
-    color_name: ['fan0'],
-
-    _init: function () {
-        this.item_name = _('Fan');
+const Fan = class SystemMonitor_Fan extends ElementBase {
+    constructor() {
+        super({
+            elt: 'fan',
+            item_name: _('Fan'),
+            color_name: ['fan0']
+        });
         this.rpm = 0;
         this.display_error = true;
-        this.parent()
         this.tip_format(_('rpm'));
-        Schema.connect('changed::' + this.elt + '-sensor-file', Lang.bind(this, this.refresh));
+        Schema.connect('changed::' + this.elt + '-sensor-file', this.refresh.bind(this));
         this.update();
-    },
-    refresh: function () {
+    }
+    refresh() {
         let sfile = Schema.get_string(this.elt + '-sensor-file');
-        if (GLib.file_test(sfile, 1 << 4)) {
+        if (GLib.file_test(sfile, GLib.FileTest.EXISTS)) {
             let file = Gio.file_new_for_path(sfile);
-            file.load_contents_async(null, Lang.bind(this, function (source, result) {
+            file.load_contents_async(null, (source, result) => {
                 let as_r = source.load_contents_finish(result)
-                this.rpm = parseInt(as_r[1]);
-            }));
+                this.rpm = parseInt(parse_bytearray(as_r[1]));
+            });
         } else if (this.display_error) {
             global.logError('error reading: ' + sfile);
             this.display_error = false;
         }
-    },
-    _apply: function () {
+    }
+    _apply() {
         this.text_items[0].text = this.rpm.toString();
         this.menu_items[0].text = this.rpm.toString();
         this.vals = [this.rpm / 10];
         this.tip_vals[0] = this.rpm;
-    },
-    create_text_items: function () {
+    }
+    create_text_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-status-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
                 text: _('rpm'), style_class: Style.get('sm-unit-label'),
                 y_align: Clutter.ActorAlign.CENTER})
         ];
-    },
-    create_menu_items: function () {
+    }
+    create_menu_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: _('rpm'),
                 style_class: Style.get('sm-label')})
         ];
     }
-});
+}
 
-const Gpu = new Lang.Class({
-    Name: 'SystemMonitor.Gpu',
-    Extends: ElementBase,
+const Gpu = class SystemMonitor_Gpu extends ElementBase {
+    constructor() {
+        super({
+            elt: 'gpu',
+            item_name: _('GPU'),
+            color_name: ['used', 'memory']
+        });
+        this.max = 100;
 
-    elt: 'gpu',
-    item_name: _('GPU'),
-    color_name: ['used'],
-    max: 100,
-
-    _init: function () {
         this.item_name = _('GPU');
         this.mem = 0;
         this.total = 0;
-        this.parent()
         this.tip_format();
         this.update();
-    },
-    _unit: function (total) {
+    }
+    _unit(total) {
         this.total = total;
         let threshold = 4 * 1024; // In MiB
         this.useGiB = false;
@@ -2073,53 +2237,45 @@ const Gpu = new Lang.Class({
             this.useGiB = true;
             this._unitConversion *= 1024 / this._decimals;
         }
-    },
-    refresh: function () {
+    }
+    refresh() {
         // Run asynchronously, to avoid shell freeze
         try {
             let path = Me.dir.get_path();
             let script = ['/bin/bash', path + '/gpu_usage.sh'];
 
-            let [, pid, , out_fd, ] = GLib.spawn_async_with_pipes(
-                null,
-                script,
-                null,
-                GLib.SpawnFlags.DO_NOT_REAP_CHILD,
-                null);
-
-            // Let's buffer the command's output - that's an input for us !
-            this._process_stream = new Gio.DataInputStream({
-                base_stream: new Gio.UnixInputStream({fd: out_fd})
-            });
-
-            // We will process the output at once when it's done
-            this._process_sourceId = GLib.child_watch_add(
-                0,
-                pid,
-                Lang.bind(this, this._readTemperature)
-            );
+            // Create subprocess and capture STDOUT
+            let proc = new Gio.Subprocess({argv: script, flags: Gio.SubprocessFlags.STDOUT_PIPE});
+            proc.init(null);
+            // Asynchronously call the output handler when script output is ready
+            proc.communicate_utf8_async(null, null, Lang.bind(this, this._handleOutput));
         } catch (err) {
-            // Deal with the error
+            global.logError(err.message);
         }
-    },
-    _readTemperature: function () {
-        let usage = [];
-        let out, size;
-        if (this._process_stream) {
-            do {
-                [out, size] = this._process_stream.read_line_utf8(null);
-                if (out) {
-                    usage.push(out);
-                }
-            } while (out);
+    }
+    _handleOutput(proc, result) {
+        let [ok, output, ] = proc.communicate_utf8_finish(result);
+        if (ok) {
+            this._readTemperature(output);
+        } else {
+            global.logError('gpu_usage.sh invocation failed');
         }
-
-        let memTotal = parseInt(usage[0]);
-        let memUsed = parseInt(usage[1]);
-        this.percentage = parseInt(usage[2]);
-
+    }
+    _sanitizeUsageValue(val) {
+        val = parseInt(val);
+        if (isNaN(val)) {
+            val = 0
+        }
+        return val;
+    }
+    _readTemperature(procOutput) {
+        let usage = procOutput.split('\n');
+        let memTotal = this._sanitizeUsageValue(usage[0]);
+        let memUsed = this._sanitizeUsageValue(usage[1]);
+        this.percentage = this._sanitizeUsageValue(usage[2]);
         if (typeof this.useGiB === 'undefined') {
             this._unit(memTotal);
+            this._update_unit();
         }
 
         if (this.useGiB) {
@@ -2131,16 +2287,8 @@ const Gpu = new Lang.Class({
             this.mem = Math.round(memUsed / this._unitConversion);
             this.total = Math.round(memTotal / this._unitConversion);
         }
-
-        this._endProcess();
-    },
-    _endProcess: function () {
-        if (this._process_stream) {
-            this._process_stream.close(null);
-            this._process_stream = null;
-        }
-    },
-    _pad: function (number) {
+    }
+    _pad(number) {
         if (this.useGiB) {
             if (number < 1) {
                 // examples: 0.01, 0.10, 0.88
@@ -2151,28 +2299,41 @@ const Gpu = new Lang.Class({
         }
 
         return number;
-    },
-    _apply: function () {
+    }
+    _update_unit() {
+        let unit = _('MiB');
+        if (this.useGiB) {
+            unit = _('GiB');
+        }
+        this.menu_items[4].text = unit;
+    }
+    _apply() {
+        this.tip_unit_labels[1].text = "/ " + this.total + " " + this.menu_items[4].text;
         if (this.total === 0) {
-            this.vals = [0];
-            this.tip_vals = [0];
+            this.vals = [0, 0];
+            this.tip_vals = [0, 0];
         } else {
-            this.vals = [this.percentage];
-            this.tip_vals = [Math.round(this.vals[0])];
+            // we subtract percentage from memory because we do not want memory to be 
+            // "accumulated" in the chart with utilization; these two measures should be 
+            // independent
+            this.vals = [this.percentage, this.mem / this.total * 100 - this.percentage];
+            this.tip_vals = [Math.round(this.vals[0]), this.mem];
         }
-        this.text_items[0].text = this.tip_vals.toString();
-        this.menu_items[0].text = this.tip_vals.toLocaleString();
+        this.text_items[0].text = this.tip_vals[0].toString();
+        this.menu_items[0].text = this.tip_vals[0].toLocaleString(Locale);
+
         if (Style.get('') !== '-compact') {
-            this.menu_items[3].text = this._pad(this.mem).toLocaleString() +
-                '  /  ' + this._pad(this.total).toLocaleString();
+            this.menu_items[3].text = this._pad(this.mem).toLocaleString(Locale) +
+                '  /  ' + this._pad(this.total).toLocaleString(Locale);
         } else {
-            this.menu_items[3].text = this._pad(this.mem).toLocaleString() +
-                '/' + this._pad(this.total).toLocaleString();
+            this.menu_items[3].text = this._pad(this.mem).toLocaleString(Locale) +
+                '/' + this._pad(this.total).toLocaleString(Locale);
         }
-    },
-    create_text_items: function () {
+    }
+    create_text_items() {
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-status-value'),
                 y_align: Clutter.ActorAlign.CENTER}),
             new St.Label({
@@ -2180,48 +2341,50 @@ const Gpu = new Lang.Class({
                 style_class: Style.get('sm-perc-label'),
                 y_align: Clutter.ActorAlign.CENTER})
         ];
-    },
-    create_menu_items: function () {
+    }
+    create_menu_items() {
         let unit = _('MiB');
         if (this.useGiB) {
             unit = _('GiB');
         }
         return [
             new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: '%',
                 style_class: Style.get('sm-label')}),
-            new St.Label(),
             new St.Label({
+                text: '',
+                style_class: Style.get('sm-label')}),
+            new St.Label({
+                text: '',
                 style_class: Style.get('sm-value')}),
             new St.Label({
                 text: unit,
                 style_class: Style.get('sm-label')})
         ];
     }
-});
+}
 
-const Icon = new Lang.Class({
-    Name: 'SystemMonitor.Icon',
-
-    _init: function () {
-        this.actor = new St.Icon({icon_name: 'utilities-system-monitor-symbolic',
-            style_class: 'system-status-icon'});
+const Icon = class SystemMonitor_Icon {
+    constructor() {
+        this.actor = new St.Icon({
+            icon_name: 'org.gnome.SystemMonitor-symbolic',
+            style_class: 'system-status-icon'
+        });
         this.actor.visible = Schema.get_boolean('icon-display');
         Schema.connect(
             'changed::icon-display',
-            Lang.bind(this,
-                function () {
-                    this.actor.visible = Schema.get_boolean('icon-display');
-                })
+            () => {
+                this.actor.visible = Schema.get_boolean('icon-display');
+            }
         );
     }
-});
+}
 
-
-var init = function () {
-    log('System monitor applet init from ' + extension.path);
+function init() {
+    log('[System monitor] applet init from ' + extension.path);
 
     Convenience.initTranslations();
     // Get locale, needed as an argument for toLocaleString() since GNOME Shell 3.24
@@ -2231,6 +2394,11 @@ var init = function () {
         Locale = Locale.split('_')[0];
     }
 
+    IconSize = Math.round(Panel.PANEL_ICON_SIZE * 4 / 5);
+}
+
+function enable() {
+    log('[System monitor] applet enabling');
     Schema = Convenience.getSettings();
 
     Style = new smStyleManager();
@@ -2238,20 +2406,15 @@ var init = function () {
 
     Background = color_from_string(Schema.get_string('background'));
 
-    IconSize = Math.round(Panel.PANEL_ICON_SIZE * 4 / 5);
-};
-
-var enable = function () {
-    log('System monitor applet enabling');
     if (!(smDepsGtop && smDepsNM)) {
         Main.__sm = {
             smdialog: new smDialog()
-        }
+        };
 
         let dialog_timeout = Mainloop.timeout_add_seconds(
             1,
-            function () {
-                Main.__sm.smdialog.open()
+            () => {
+                Main.__sm.smdialog.open();
                 Mainloop.source_remove(dialog_timeout);
                 return true;
             });
@@ -2271,8 +2434,8 @@ var enable = function () {
         Main.__sm = {
             tray: new PanelMenu.Button(0.5),
             icon: new Icon(),
-            pie: new Pie(Style.pie_width(), Style.pie_height()), // 300, 300
-            bar: new Bar(Style.bar_width(), Style.bar_height()), // 300, 150
+            pie: new Pie(),
+            bar: new Bar(),
             elts: [],
         };
 
@@ -2291,37 +2454,26 @@ var enable = function () {
         let tray = Main.__sm.tray;
         let elts = Main.__sm.elts;
 
-
         if (Schema.get_boolean('move-clock')) {
-            let dateMenu;
-            if (Compat.versionCompare(shell_Version, '3.5.90')) {
-                dateMenu = Main.panel.statusArea.dateMenu;
-                Main.panel._centerBox.remove_actor(dateMenu.container);
-                Main.panel._addToPanelBox('dateMenu', dateMenu, -1, Main.panel._rightBox);
-            } else {
-                dateMenu = Main.panel._dateMenu;
-                Main.panel._centerBox.remove_actor(dateMenu.actor);
-                Main.panel._rightBox.insert_child_at_index(dateMenu.actor, -1);
-            }
+            let dateMenu = Main.panel.statusArea.dateMenu;
+            Main.panel._centerBox.remove_actor(dateMenu.container);
+            Main.panel._addToPanelBox('dateMenu', dateMenu, -1, Main.panel._rightBox);
             tray.clockMoved = true;
         }
 
-        Schema.connect('changed::background', Lang.bind(
-            this, function (schema, key) {
-                Background = color_from_string(Schema.get_string(key));
-            }));
-        if (!Compat.versionCompare(shell_Version, '3.5.5')) {
-            StatusArea.systemMonitor = tray;
-            panel.insert_child_at_index(tray.actor, 1);
-            panel.child_set(tray.actor, {y_fill: true});
-        } else {
-            Main.panel._addToPanelBox('system-monitor', tray, 1, panel);
-        }
+        Schema.connect('changed::background', (schema, key) => {
+            Background = color_from_string(Schema.get_string(key));
+        });
+        Main.panel._addToPanelBox('system-monitor', tray, 1, panel);
 
         // The spacing adds a distance between the graphs/text on the top bar
         let spacing = Schema.get_boolean('compact-display') ? '1' : '4';
         let box = new St.BoxLayout({style: 'spacing: ' + spacing + 'px;'});
-        tray.actor.add_actor(box);
+        if (shell_Version < '3.36') {
+            tray.actor.add_actor(box);
+        } else {
+            tray.add_actor(box);
+        }
         box.add_actor(Main.__sm.icon.actor);
         // Add items to panel box
         for (let elt in elts) {
@@ -2359,7 +2511,7 @@ var enable = function () {
 
                     menu_timeout = Mainloop.timeout_add_seconds(
                         5,
-                        function () {
+                        () => {
                             Main.__sm.pie.actor.queue_repaint();
                             return true;
                         });
@@ -2372,16 +2524,21 @@ var enable = function () {
         let _appSys = Shell.AppSystem.get_default();
         let _gsmApp = _appSys.lookup_app('gnome-system-monitor.desktop');
         let _gsmPrefs = _appSys.lookup_app('gnome-shell-extension-prefs.desktop');
+        if (_gsmPrefs === null) {
+            _gsmPrefs = _appSys.lookup_app('org.gnome.Extensions.desktop');
+        }
         let item;
         item = new PopupMenu.PopupMenuItem(_('System Monitor...'));
-        item.connect('activate', function () {
+        item.connect('activate', () => {
             _gsmApp.activate();
         });
         tray.menu.addMenuItem(item);
 
         item = new PopupMenu.PopupMenuItem(_('Preferences...'));
-        item.connect('activate', function () {
-            if (_gsmPrefs.get_state() === _gsmPrefs.SHELL_APP_STATE_RUNNING) {
+        item.connect('activate', () => {
+            if (typeof ExtensionUtils.openPrefs === 'function') {
+                ExtensionUtils.openPrefs();
+            } else if (_gsmPrefs.get_state() === _gsmPrefs.SHELL_APP_STATE_RUNNING) {
                 _gsmPrefs.activate();
             } else {
                 let info = _gsmPrefs.get_app_info();
@@ -2390,29 +2547,17 @@ var enable = function () {
             }
         });
         tray.menu.addMenuItem(item);
-        if (Compat.versionCompare(shell_Version, '3.5.5')) {
-            Main.panel.menuManager.addMenu(tray.menu);
-        } else {
-            Main.panel._menus.addMenu(tray.menu);
-        }
+        Main.panel.menuManager.addMenu(tray.menu);
     }
+    log('[System monitor] applet enabling done');
+}
 
-    log('System monitor applet enabling done');
-};
-
-var disable = function () {
+function disable() {
     // restore clock
     if (Main.__sm.tray.clockMoved) {
-        let dateMenu;
-        if (Compat.versionCompare(shell_Version, '3.5.90')) {
-            dateMenu = Main.panel.statusArea.dateMenu;
-            Main.panel._rightBox.remove_actor(dateMenu.container);
-            Main.panel._addToPanelBox('dateMenu', dateMenu, Main.sessionMode.panel.center.indexOf('dateMenu'), Main.panel._centerBox);
-        } else {
-            dateMenu = Main.panel._dateMenu;
-            Main.panel._rightBox.remove_actor(dateMenu.actor);
-            Main.panel._centerBox.insert_child_at_index(dateMenu.actor, 0);
-        }
+        let dateMenu = Main.panel.statusArea.dateMenu;
+        Main.panel._rightBox.remove_actor(dateMenu.container);
+        Main.panel._addToPanelBox('dateMenu', dateMenu, Main.sessionMode.panel.center.indexOf('dateMenu'), Main.panel._centerBox);
     }
     // restore system power icon if necessary
     // workaround bug introduced by multiple cpus init :
@@ -2424,19 +2569,25 @@ var disable = function () {
     //        Main.__sm.elts[i].hide_system_icon(false);
     // }
 
-    MountsMonitor.disconnect();
+    if (MountsMonitor) {
+        MountsMonitor.disconnect();
+        MountsMonitor = null;
+    }
+
+    if (Style) {
+        Style = null;
+    }
 
     Schema.run_dispose();
     for (let eltName in Main.__sm.elts) {
         Main.__sm.elts[eltName].destroy();
     }
-
-    if (!Compat.versionCompare(shell_Version, '3.5')) {
-        Main.__sm.tray.destroy();
-        StatusArea.systemMonitor = null;
-    } else {
+    if (shell_Version < '3.36') {
         Main.__sm.tray.actor.destroy();
+    } else {
+        Main.__sm.tray.destroy();
     }
     Main.__sm = null;
-    log('System monitor applet disable');
-};
+
+    log('[System monitor] applet disable');
+}

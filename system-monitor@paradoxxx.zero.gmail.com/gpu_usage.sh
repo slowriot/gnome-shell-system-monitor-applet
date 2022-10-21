@@ -1,11 +1,11 @@
-#!/bin/bash
+#!/bin/sh
 ##################################################################################
 #    This file is part of System Monitor Gnome extension.
-#    Apt Update Indicator is free software: you can redistribute it and/or modify
+#    System Monitor Gnome extension is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
 #    the Free Software Foundation, either version 3 of the License, or
 #    (at your option) any later version.
-#    Apt Update Indicator is distributed in the hope that it will be useful,
+#    System Monitor Gnome extension is distributed in the hope that it will be useful,
 #    but WITHOUT ANY WARRANTY; without even the implied warranty of
 #    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #    GNU General Public License for more details.
@@ -20,9 +20,30 @@
 #                                #
 ##################################
 
-# This will print two lines. The first one is the the total vRAM available,
-# while the second one is the used vRAM.
-nvidia-smi -i 0 -q -d MEMORY | grep -A4 -i gpu | egrep -i "used|total" | awk '{print $3}'
+checkcommand()
+{
+	command -v "$1" > /dev/null 2>&1
+}
 
-# This line will print the GPU usage in %.
-nvidia-smi -i 0 -q -d UTILIZATION | grep Gpu | awk '{print $3}'
+# This will print three lines. The first one is the the total vRAM available,
+# the second one is the used vRAM and the third on is the GPU usage in %.
+if checkcommand nvidia-smi; then
+	nvidia-smi -i 0 --query-gpu=memory.total,memory.used,utilization.gpu --format=csv,noheader,nounits | while IFS=', ' read -r a b c; do echo "$a"; echo "$b"; echo "$c"; done
+
+elif lsmod | grep amdgpu > /dev/null; then
+	total=$(cat /sys/class/drm/card0/device/mem_info_vram_total)
+	echo $(($total / 1024 / 1024))
+
+	used=$(cat /sys/class/drm/card0/device/mem_info_vram_used)
+	echo $(($used / 1024 / 1024))
+
+	cat /sys/class/drm/card0/device/gpu_busy_percent
+
+elif checkcommand glxinfo; then
+	TOTALVRAM=$(glxinfo | grep -A2 -i GL_NVX_gpu_memory_info | grep -E -i "dedicated" | cut -f2- -d ':' | gawk '{print $1}')
+	AVAILVRAM=$(glxinfo | grep -A4 -i GL_NVX_gpu_memory_info | grep -E -i "available dedicated" | cut -f2- -d ':' | gawk '{print $1}')
+	FREEVRAM=$((TOTALVRAM-AVAILVRAM))
+	echo "$TOTALVRAM"
+	echo "$FREEVRAM"
+
+fi
