@@ -1632,7 +1632,11 @@ const Freq = class SystemMonitor_Freq extends ElementBase {
         this.tip_vals[0] = value_min;
         this.tip_vals[1] = value_avg;
         this.tip_vals[2] = value_max;
-        //this.menu_items[3].text = value_avg;
+        if (Style.get('') !== '-compact') {
+            this.menu_items[0].text = value_avg;
+        } else {
+            this.menu_items[0].text = this._pad(value_avg, 4);
+        }
     }
     // pad a string with leading spaces
     _pad(number, length) {
