@@ -1082,11 +1082,13 @@ const Battery = class SystemMonitor_Battery extends ElementBase {
         this.icon_hidden = false;
         this.percentage = 0;
         this.timeString = '-- ';
+        /*
         this._proxy = StatusArea.aggregateMenu._power._proxy;
         if (typeof (this._proxy) === 'undefined') {
             this._proxy = StatusArea.battery._proxy;
         }
         this.powerSigID = this._proxy.connect('g-properties-changed', this.update_battery.bind(this));
+        */
 
         // need to specify a default icon, since the contructor completes before UPower callback
         this.gicon = Gio.icon_new_for_string(this.icon);
@@ -1108,6 +1110,7 @@ const Battery = class SystemMonitor_Battery extends ElementBase {
         // callback function for when battery stats updated.
         let battery_found = false;
         let isBattery = false;
+        /*
         if (typeof (this._proxy.GetDevicesRemote) === 'undefined') {
             let device_type = this._proxy.Type;
             isBattery = (device_type === UPower.DeviceKind.BATTERY);
@@ -1153,6 +1156,7 @@ const Battery = class SystemMonitor_Battery extends ElementBase {
                 }
             });
         }
+        */
     }
     update_battery_value(seconds, percentage, icon) {
         if (seconds > 60) {
@@ -1276,7 +1280,9 @@ const Battery = class SystemMonitor_Battery extends ElementBase {
     }
     destroy() {
         ElementBase.prototype.destroy.call(this);
+        /*
         this._proxy.disconnect(this.powerSigID);
+        */
     }
 }
 
