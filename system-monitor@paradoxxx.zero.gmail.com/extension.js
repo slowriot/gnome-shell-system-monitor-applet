@@ -107,11 +107,12 @@ Clutter.Actor.prototype.reparent = function reparent(newParent) {
     newParent.add_child(this);
 }
 
-function parse_bytearray(bytearray) {
-    if (!ByteArray.toString(bytearray).match(/GjsModule byteArray/)) {
-        return ByteArray.toString(bytearray);
+function parse_bytearray(maybeBA) {
+    const decoded = ByteArray.toString(maybeBA);
+    if ((/GjsModule byteArray/).test(decoded)) {
+        return maybeBA;
     }
-    return bytearray
+    return decoded;
 }
 
 function l_limit(t) {
@@ -282,46 +283,47 @@ const smStyleManager = class SystemMonitor_smStyleManager {
     }
 }
 
-const smDialog = class SystemMonitor_smDialog extends ModalDialog.ModalDialog {
-    constructor() {
-        super({styleClass: 'prompt-dialog'});
-        let mainContentBox = new St.BoxLayout({style_class: 'prompt-dialog-main-layout',
-            vertical: false});
-        this.contentLayout.add(mainContentBox,
-            {x_fill: true,
-                y_fill: true});
+const smDialog = GObject.registerClass(
+    class SystemMonitor_smDialog extends ModalDialog.ModalDialog {
+        constructor() {
+            super({styleClass: 'prompt-dialog'});
+            let mainContentBox = new St.BoxLayout({style_class: 'prompt-dialog-main-layout',
+                vertical: false});
+            this.contentLayout.add(mainContentBox,
+                {x_fill: true,
+                    y_fill: true});
 
-        let messageBox = new St.BoxLayout({style_class: 'prompt-dialog-message-layout',
-            vertical: true});
-        mainContentBox.add(messageBox,
-            {y_align: St.Align.START});
+            let messageBox = new St.BoxLayout({style_class: 'prompt-dialog-message-layout',
+                vertical: true});
+            mainContentBox.add(messageBox,
+                {y_align: St.Align.START});
 
-        this._subjectLabel = new St.Label({style_class: 'prompt-dialog-headline',
-            text: _('System Monitor Extension')});
+            this._subjectLabel = new St.Label({style_class: 'prompt-dialog-headline',
+                text: _('System Monitor Extension')});
 
-        messageBox.add(this._subjectLabel,
-            {y_fill: false,
-                y_align: St.Align.START});
+            messageBox.add(this._subjectLabel,
+                {y_fill: false,
+                    y_align: St.Align.START});
 
-        this._descriptionLabel = new St.Label({style_class: 'prompt-dialog-description',
-            text: MESSAGE});
+            this._descriptionLabel = new St.Label({style_class: 'prompt-dialog-description',
+                text: MESSAGE});
 
-        messageBox.add(this._descriptionLabel,
-            {y_fill: true,
-                y_align: St.Align.START});
+            messageBox.add(this._descriptionLabel,
+                {y_fill: true,
+                    y_align: St.Align.START});
 
 
-        this.setButtons([
-            {
-                label: _('Cancel'),
-                action: () => {
-                    this.close();
-                },
-                key: Clutter.Escape
-            }
-        ]);
-    }
-}
+            this.setButtons([
+                {
+                    label: _('Cancel'),
+                    action: () => {
+                        this.close();
+                    },
+                    key: Clutter.Escape
+                }
+            ]);
+        }
+    });
 
 const Chart = class SystemMonitor_Chart {
     constructor(width, height, parent) {
@@ -870,7 +872,7 @@ const TipBox = class SystemMonitor_TipBox {
             this.out_to = 0;
         }
         if (!this.in_to) {
-            this.in_to = Mainloop.timeout_add(500,
+            this.in_to = Mainloop.timeout_add(Schema.get_int('tooltip-delay-ms'),
                 this.show_tip.bind(this));
         }
     }
@@ -880,7 +882,7 @@ const TipBox = class SystemMonitor_TipBox {
             this.in_to = 0;
         }
         if (!this.out_to) {
-            this.out_to = Mainloop.timeout_add(500,
+            this.out_to = Mainloop.timeout_add(Schema.get_int('tooltip-delay-ms'),
                 this.hide_tip.bind(this));
         }
     }
@@ -1082,13 +1084,15 @@ const Battery = class SystemMonitor_Battery extends ElementBase {
         this.icon_hidden = false;
         this.percentage = 0;
         this.timeString = '-- ';
-        /*
-        this._proxy = StatusArea.aggregateMenu._power._proxy;
+        if (shell_Version >= '43') {
+            this._proxy = StatusArea.quickSettings._system._systemItem._powerToggle._proxy;
+        } else {
+            this._proxy = StatusArea.aggregateMenu._power._proxy;
+        }
         if (typeof (this._proxy) === 'undefined') {
             this._proxy = StatusArea.battery._proxy;
         }
         this.powerSigID = this._proxy.connect('g-properties-changed', this.update_battery.bind(this));
-        */
 
         // need to specify a default icon, since the contructor completes before UPower callback
         this.gicon = Gio.icon_new_for_string(this.icon);
@@ -1584,7 +1588,7 @@ const Disk = class SystemMonitor_Disk extends ElementBase {
                 text: Style.diskunits(),
                 style_class: Style.get('sm-label')}),
             new St.Label({
-                text: _('R'),
+                text: ' ' + _('R'),
                 style_class: Style.get('sm-label')}),
             new St.Label({
                 text: '',
@@ -2407,6 +2411,14 @@ function init() {
     IconSize = Math.round(Panel.PANEL_ICON_SIZE * 4 / 5);
 }
 
+function _onSessionModeChanged(session) {
+    if (session.currentMode === 'user' || session.parentMode === 'user') {
+        Main.__sm.tray.show()
+    } else if (session.currentMode === 'unlock-dialog' && !Schema.get_boolean('show-on-lockscreen')) {
+        Main.__sm.tray.hide()
+    }
+}
+
 function enable() {
     log('[System monitor] applet enabling');
     Schema = Convenience.getSettings();
@@ -2450,19 +2462,34 @@ function enable() {
         };
 
         // Items to Monitor
-        Main.__sm.elts = createCpus();
-        Main.__sm.elts.push(new Freq());
-        Main.__sm.elts.push(new Mem());
-        Main.__sm.elts.push(new Swap());
-        Main.__sm.elts.push(new Net());
-        Main.__sm.elts.push(new Disk());
-        Main.__sm.elts.push(new Gpu());
-        Main.__sm.elts.push(new Thermal());
-        Main.__sm.elts.push(new Fan());
-        Main.__sm.elts.push(new Battery());
-
         let tray = Main.__sm.tray;
         let elts = Main.__sm.elts;
+
+        // Load the preferred position of the displays and insert them in said order.
+        const positionList = {};
+        // CPUs are inserted differently, so cpu-position is stored apart
+        const cpuPosition = Schema.get_int('cpu-position');
+        positionList[cpuPosition] = createCpus();
+        positionList[Schema.get_int('freq-position')] = new Freq();
+        positionList[Schema.get_int('memory-position')] = new Mem();
+        positionList[Schema.get_int('swap-position')] = new Swap();
+        positionList[Schema.get_int('net-position')] = new Net();
+        positionList[Schema.get_int('disk-position')] = new Disk();
+        positionList[Schema.get_int('gpu-position')] = new Gpu();
+        positionList[Schema.get_int('thermal-position')] = new Thermal();
+        positionList[Schema.get_int('fan-position')] = new Fan();
+        positionList[Schema.get_int('battery-position')] = new Battery();
+
+        for (let i = 0; i < Object.keys(positionList).length; i++) {
+            if (i === cpuPosition) {
+                // CPUs are in an array, store them one by one
+                for (let cpu of positionList[cpuPosition]) {
+                    elts.push(cpu);
+                }
+            } else {
+                elts.push(positionList[i]);
+            }
+        }
 
         if (Schema.get_boolean('move-clock')) {
             let dateMenu = Main.panel.statusArea.dateMenu;
@@ -2558,6 +2585,10 @@ function enable() {
         });
         tray.menu.addMenuItem(item);
         Main.panel.menuManager.addMenu(tray.menu);
+
+        if (shell_Version >= '42') {
+            Main.sessionMode.connect('updated', _onSessionModeChanged);
+        }
     }
     log('[System monitor] applet enabling done');
 }
